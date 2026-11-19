@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- .NET Framework 4.8 WinForms exe. Builds with the .NET SDK on Windows or Linux
+       (reference assemblies from Microsoft.NETFramework.ReferenceAssemblies, Windows OCR contracts
+       from Microsoft.Windows.SDK.Contracts; neither ships with the exe). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>KavrosSlayerHelper</AssemblyName>
+    <RootNamespace>KavrosSlayerHelper</RootNamespace>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <Deterministic>true</Deterministic>
+    <DebugType>none</DebugType>
+    <Optimize>true</Optimize>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <ApplicationManifest>src/app.manifest</ApplicationManifest>
+    <ApplicationIcon>assets/KavrosSlayerHelper.ico</ApplicationIcon>
+    <GenerateResourceUsePreserializedResources>false</GenerateResourceUsePreserializedResources>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="src/*.cs;src/Core/*.cs" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <EmbeddedResource Include="assets/*.ttf;assets/KavrosSlayerHelper.ico" LogicalName="KavrosSlayerHelper.Assets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="data/slayer.json" LogicalName="KavrosSlayerHelper.Assets.slayer.json" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Windows.SDK.Contracts" Version="10.0.19041.1" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

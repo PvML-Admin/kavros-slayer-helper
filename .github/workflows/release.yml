@@ -1,0 +1,55 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds the exe, runs the unit tests and attaches
+# KavrosSlayerHelper-win-Portable.zip (current/KavrosSlayerHelper.exe) to that tag's GitHub Release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Unit tests
+        run: dotnet run -c Release --project tests/UnitTests
+
+      - name: Build
+        run: dotnet build KavrosSlayerHelper.csproj -c Release -o out
+
+      - name: Pack
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/pack/current | Out-Null
+          Copy-Item out/KavrosSlayerHelper.exe dist/pack/current/
+          Compress-Archive -Path dist/pack/current -DestinationPath dist/KavrosSlayerHelper-win-Portable.zip -Force
+          $h = (Get-FileHash dist/KavrosSlayerHelper-win-Portable.zip -Algorithm SHA256).Hash.ToLower()
+          "$h  KavrosSlayerHelper-win-Portable.zip" | Out-File -Encoding ascii dist/KavrosSlayerHelper-win-Portable.zip.sha256.txt
+          Get-Content dist/KavrosSlayerHelper-win-Portable.zip.sha256.txt
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: KavrosSlayerHelper-win-Portable
+          path: dist/KavrosSlayerHelper-win-Portable.zip*
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            dist/KavrosSlayerHelper-win-Portable.zip
+            dist/KavrosSlayerHelper-win-Portable.zip.sha256.txt

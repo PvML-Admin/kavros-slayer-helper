@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Unit tests for the parser, data merge and countdown (src/Core, no WinForms). Runs natively:
+       dotnet run -c Release (project tests/UnitTests) -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <RootNamespace>KavrosSlayerHelper.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Core/*.cs" />
+    <Compile Include="*.cs" />
+    <None Include="../../data/slayer.json" Link="slayer.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

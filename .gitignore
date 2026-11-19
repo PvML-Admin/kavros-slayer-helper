@@ -1,0 +1,12 @@
+.wiki-cache/
+bin/
+obj/
+out/
+dist/
+*.zip
+*.sha256.txt
+build.log
+tests/UnitTests/bin/
+tests/UnitTests/obj/
+shots/
+__pycache__/

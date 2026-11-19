@@ -1,0 +1,10 @@
+{
+  "id": "slayer-helper",
+  "name": "Slayer helper",
+  "author": "Meleeman112",
+  "version": "0.1.0",
+  "summary": "Docks over the Kavros client and tracks your Slayer task from chat: kills left, the master, where to go, what to bring, and your streak and points.",
+  "repository": "https://github.com/PvML-Admin/kavros-slayer-helper",
+  "executable": "KavrosSlayerHelper.exe",
+  "singleInstance": "Local\\KavrosSlayerHelper"
+}
