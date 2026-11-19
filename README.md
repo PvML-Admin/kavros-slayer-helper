@@ -2,6 +2,8 @@
 
 A Companion module for the Kavros client. It reads your slayer task from chat, counts the remaining kills, and shows where to go, what to use, and your streak and points.
 
+Created by Meleeman112.
+
 Players only install Kavros Companion. Companion downloads this app from the [Releases](https://github.com/PvML-Admin/kavros-slayer-helper/releases) on this repository and keeps it up to date.
 
 ## Status
