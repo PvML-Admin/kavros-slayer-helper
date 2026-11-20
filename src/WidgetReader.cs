@@ -20,6 +20,18 @@ namespace KavrosSlayerHelper
         public bool Forced;
     }
 
+    /// <summary>One full capture and what the reader made of it, for "Save debug capture".</summary>
+    internal sealed class DebugFrame
+    {
+        public RgbImage Full;
+        public Rectangle Area;
+        public Box Locked, Dialogue;
+        public bool LockedMinimised;
+        public List<CounterCandidate> Expanded, Minimised;
+        public readonly List<string> Notes = new List<string>();
+        public readonly DateTime Time = DateTime.Now;
+    }
+
     /// <summary>Reads the RS3 slayer counter and the slayer master's dialogue box on a background thread.
     /// The counter is found once by colour (yellow text stacked on a dark box) and confirmed by OCR, then only
     /// its small region is captured; OCR runs only when its pixels change, and a kill is usually read by
@@ -43,6 +55,8 @@ namespace KavrosSlayerHelper
         long counterFp, counterRestFp, dialogueFp;
         int counterMisses, searches, tick, lastLeft = -1;
         Box numberRow;                                // the big number inside the counter region (region px)
+        bool lockedMinimised;                         // the locked counter is the minimised form (just the number)
+        volatile DebugFrame lastFrame;                // the last full capture and what was found in it
         readonly DigitReader digits = new DigitReader();
 
         public int IntervalMs = 1000;
@@ -74,7 +88,7 @@ namespace KavrosSlayerHelper
 
         public void Rescan()
         {
-            lock (gate) { counter = Box.Empty; counterFp = 0; dialogueFp = 0; }
+            lock (gate) { counter = Box.Empty; counterFp = 0; dialogueFp = 0; lockedMinimised = false; }
             rescan = true;
             wake.Set();
         }
@@ -117,6 +131,7 @@ namespace KavrosSlayerHelper
             bool fullLook = forced || locked.IsEmpty || tick % 2 == 0;
             RgbImage full = fullLook ? CaptureRgb(a, areaBox) : null;
             if (full != null && !exRel.IsEmpty) Blank(full, exRel);
+            DebugFrame dbg = full != null ? new DebugFrame { Full = full, Area = a, Locked = locked, LockedMinimised = lockedMinimised } : null;
 
             // ---- counter ----
             if (!locked.IsEmpty)
@@ -124,10 +139,15 @@ namespace KavrosSlayerHelper
                 RgbImage img = full != null ? full.Crop(locked) : CaptureRgb(a, locked);
                 if (full == null && !exRel.IsEmpty) Blank(img, new Box(exRel.X - locked.X, exRel.Y - locked.Y, exRel.W, exRel.H));
                 ReadCounter(img, locked, forced, read);
+                if (dbg != null) dbg.Notes.Add("locked counter " + locked + (lockedMinimised ? " (minimised)" : "") + " -> " + (read.Counter != null ? read.Counter.ToString() : "no new read"));
+                // Locked on the minimised counter: now and then look for the expanded one (task, points, streak).
+                if (full != null && lockedMinimised && tick % 6 == 0) SearchExpanded(full, read, dbg);
+                // Unreadable twice in a row (minimised, expanded or moved): look around straight away.
+                else if (full != null && read.Counter == null && counterMisses >= 2 && fixedCounter == null) SearchCounter(full, read, dbg);
             }
             else if (full != null)
             {
-                SearchCounter(full, read);
+                SearchCounter(full, read, dbg);
             }
 
             // ---- dialogue ----
@@ -146,9 +166,11 @@ namespace KavrosSlayerHelper
                         dialogueFp = fp;
                         read.Dialogue = OcrDialogue(full, d);
                         if (Log.Verbose) Log.Write("dialogue at " + d + ": " + string.Join(" | ", read.Dialogue.Select(l => l.Text)));
+                        if (dbg != null) dbg.Notes.Add("dialogue at " + d + ": " + string.Join(" | ", read.Dialogue.Select(l => l.Text)));
                     }
                 }
             }
+            if (dbg != null) { dbg.Dialogue = WidgetFinder.FindDialogue(full); lastFrame = dbg; }
             if (read.Counter != null || read.Dialogue != null || read.DialogueGone || forced) deliver(read);
         }
 
@@ -167,7 +189,7 @@ namespace KavrosSlayerHelper
                 {
                     counterFp = fp;
                     lastLeft = n;
-                    read.Counter = new CounterRead { Left = n, Task = lastTask, Points = lastPoints, Streak = lastStreak };
+                    read.Counter = new CounterRead { Left = n, Task = lastTask, Points = lastPoints, Streak = lastStreak, Minimised = lastMinimised };
                     read.CounterDirect = true;
                     return;
                 }
@@ -192,11 +214,11 @@ namespace KavrosSlayerHelper
             }
         }
 
-        string lastTask = ""; int lastPoints = -1, lastStreak = -1;
+        string lastTask = ""; int lastPoints = -1, lastStreak = -1; bool lastMinimised;
 
         void Remember(CounterRead r, RgbImage img)
         {
-            lastLeft = r.Left; lastTask = r.Task; lastPoints = r.Points; lastStreak = r.Streak;
+            lastLeft = r.Left; lastTask = r.Task; lastPoints = r.Points; lastStreak = r.Streak; lastMinimised = r.Minimised;
             numberRow = Box.Empty;
             if (r.NumberLine != null)
             {
@@ -210,34 +232,68 @@ namespace KavrosSlayerHelper
             }
         }
 
-        void SearchCounter(RgbImage full, WidgetRead read)
+        int candidateTurn;
+
+        /// <summary>Looks for the expanded counter (yellow number and task over white labels) by colour.</summary>
+        bool SearchExpanded(RgbImage full, WidgetRead read, DebugFrame dbg)
+        {
+            List<CounterCandidate> cands = WidgetFinder.FindCounters(full);
+            if (dbg != null) dbg.Expanded = cands;
+            // OCR the best two, plus one more of the rest in turn (a busy scene can outscore the counter).
+            var order = cands.Take(2).ToList();
+            if (cands.Count > 2) order.Add(cands[2 + (candidateTurn++ % (cands.Count - 2))]);
+            foreach (CounterCandidate c in order)
+            {
+                RgbImage img = full.Crop(c.Region);
+                CounterRead r = CounterParser.Parse(OcrLines(img, new Box(0, 0, img.W, img.H), 3f, false));
+                if (dbg != null) dbg.Notes.Add("expanded candidate " + c.Region + " score " + c.Score.ToString("0.00") + " -> " + r + (r.Valid ? "" : " (invalid)"));
+                if (!r.Valid || r.Minimised) continue;
+                Lock(c.Region, full, img, r, read, "colour");
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>Looks for the minimised counter (one yellow number, skull icon at its top-right).</summary>
+        bool SearchMinimised(RgbImage full, WidgetRead read, DebugFrame dbg)
+        {
+            List<CounterCandidate> cands = WidgetFinder.FindMinimisedCounters(full);
+            if (dbg != null) dbg.Minimised = cands;
+            foreach (CounterCandidate c in cands.Take(2))
+            {
+                RgbImage img = full.Crop(c.Region);
+                CounterRead r = CounterParser.Parse(OcrLines(img, new Box(0, 0, img.W, img.H), 3f, false));
+                if (dbg != null) dbg.Notes.Add("minimised candidate " + c.Region + " score " + c.Score.ToString("0.00") + " -> " + r + (r.Valid ? "" : " (invalid)"));
+                if (!r.Valid || !r.Minimised) continue;
+                Lock(c.Region, full, img, r, read, "colour (minimised)");
+                return true;
+            }
+            return false;
+        }
+
+        void SearchCounter(RgbImage full, WidgetRead read, DebugFrame dbg)
         {
             searches++;
-            List<Box> cands = WidgetFinder.FindCounterCandidates(full);
-            foreach (Box c in cands.Take(2))
-            {
-                RgbImage img = full.Crop(c);
-                CounterRead r = CounterParser.Parse(OcrLines(img, new Box(0, 0, img.W, img.H), 3f, false));
-                if (!r.Valid) continue;
-                Lock(c, full, img, r, read, "colour");
-                return;
-            }
+            if (SearchExpanded(full, read, dbg)) return;
+            if (SearchMinimised(full, read, dbg)) return;
             // Fallback every 5th look: OCR the whole game for the counter's labels.
             if (searches % 5 != 0) { Status = "Looking for the slayer counter\u2026"; return; }
             List<TextLine> lines = OcrLines(full, new Box(0, 0, full.W, full.H), 1.5f, false);
             TextLine label = lines.FirstOrDefault(l => Regex.IsMatch(l.Text, @"slayer\s*p[o0]i?nts|task\s*str", RegexOptions.IgnoreCase));
+            if (dbg != null) dbg.Notes.Add("label search: " + (label == null ? "no counter labels in " + lines.Count + " lines" : "\"" + label.Text + "\""));
             if (label == null) { Status = "Looking for the slayer counter\u2026"; return; }
             float lh = Math.Max(8, label.H);
             var box = new Box((int)(label.X - lh * 3), (int)(label.Y - lh * 6), (int)(label.W + lh * 6), (int)(lh * 10)).Intersect(new Box(0, 0, full.W, full.H));
             RgbImage cimg = full.Crop(box);
             CounterRead cr = CounterParser.Parse(OcrLines(cimg, new Box(0, 0, cimg.W, cimg.H), 3f, false));
-            if (cr.Valid) Lock(box, full, cimg, cr, read, "labels");
+            if (cr.Valid && !cr.Minimised) Lock(box, full, cimg, cr, read, "labels");
             else Status = "Looking for the slayer counter\u2026";
         }
 
         void Lock(Box c, RgbImage full, RgbImage img, CounterRead r, WidgetRead read, string how)
         {
             lock (gate) counter = c;
+            lockedMinimised = r.Minimised;
             counterFp = WidgetFinder.Fingerprint(img, new Box(0, 0, img.W, img.H));
             counterMisses = 0;
             Status = "";
@@ -265,6 +321,11 @@ namespace KavrosSlayerHelper
         {
             var result = new List<TextLine>();
             if (stop) return result;
+            region = region.Intersect(new Box(0, 0, img.W, img.H));
+            if (region.IsEmpty) return result;
+            // Windows OCR refuses images larger than its limit (about 2600 px a side).
+            int maxDim = ocr.MaxDimension;
+            if (maxDim > 0 && Math.Max(region.W, region.H) * scale > maxDim) scale = maxDim / (float)Math.Max(region.W, region.H);
             using (Bitmap src = ToBitmap(img, region))
             using (Bitmap prepared = darkOnLight ? PrepareDarkOnLight(src, scale) : PrepareLightOnDark(src, scale))
             {
@@ -403,6 +464,38 @@ namespace KavrosSlayerHelper
                 Marshal.Copy(px, 0, d.Scan0, px.Length);
             }
             finally { big.UnlockBits(d); }
+        }
+
+        /// <summary>Writes the last full capture, the counter crop and a text report of what was detected to
+        /// <paramref name="dir"/>. Returns the report's path, or null when nothing has been captured yet.</summary>
+        public string SaveDebug(string dir, string extra)
+        {
+            DebugFrame f = lastFrame;
+            if (f == null || f.Full == null) return null;
+            System.IO.Directory.CreateDirectory(dir);
+            string stamp = f.Time.ToString("yyyyMMdd-HHmmss");
+            string png = System.IO.Path.Combine(dir, "capture-" + stamp + ".png");
+            using (Bitmap b = ToBitmap(f.Full, new Box(0, 0, f.Full.W, f.Full.H))) b.Save(png, ImageFormat.Png);
+            if (!f.Locked.IsEmpty)
+                using (Bitmap b = ToBitmap(f.Full, f.Locked)) b.Save(System.IO.Path.Combine(dir, "counter-" + stamp + ".png"), ImageFormat.Png);
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("Kavros Slayer Helper " + Program.Version + " debug capture " + f.Time.ToString("yyyy-MM-dd HH:mm:ss"));
+            sb.AppendLine("game area (screen px): " + f.Area + "  capture " + f.Full.W + "x" + f.Full.H);
+            sb.AppendLine("status: " + Status);
+            sb.AppendLine("locked counter: " + (f.Locked.IsEmpty ? "none" : f.Locked + (f.LockedMinimised ? " (minimised)" : "")));
+            sb.AppendLine("dialogue box: " + (f.Dialogue.IsEmpty ? "none" : f.Dialogue.ToString()));
+            List<CounterCandidate> ex = f.Expanded ?? WidgetFinder.FindCounters(f.Full);
+            sb.AppendLine("expanded counter candidates (" + ex.Count + "):");
+            foreach (var c in ex.Take(10)) sb.AppendLine("  " + c.Region + " text " + c.Text + " rows " + c.Rows.Count + " labels " + c.Labels + " score " + c.Score.ToString("0.00"));
+            List<CounterCandidate> mi = f.Minimised ?? WidgetFinder.FindMinimisedCounters(f.Full);
+            sb.AppendLine("minimised counter candidates (" + mi.Count + "):");
+            foreach (var c in mi.Take(10)) sb.AppendLine("  " + c.Region + " number " + c.Text + " score " + c.Score.ToString("0.00"));
+            sb.AppendLine("this capture:");
+            foreach (string n in f.Notes) sb.AppendLine("  " + n);
+            if (!string.IsNullOrEmpty(extra)) { sb.AppendLine(); sb.AppendLine(extra); }
+            string txt = System.IO.Path.Combine(dir, "capture-" + stamp + ".txt");
+            System.IO.File.WriteAllText(txt, sb.ToString());
+            return txt;
         }
 
         public void Dispose()

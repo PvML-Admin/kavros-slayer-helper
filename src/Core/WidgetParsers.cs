@@ -23,12 +23,13 @@ namespace KavrosSlayerHelper.Core
         public int Left = -1, Points = -1, Streak = -1;
         public string Task = "";
         public TextLine NumberLine;          // the big number's OCR line (for digit learning)
-        public bool Valid { get { return Left >= 0 && (Points >= 0 || Streak >= 0 || Task.Length > 0); } }
+        public bool Minimised;               // the minimised counter: just the kills left
+        public bool Valid { get { return Left >= 0 && (Minimised || Points >= 0 || Streak >= 0 || Task.Length > 0); } }
         public bool SameValues(CounterRead o)
         {
             return o != null && Left == o.Left && Points == o.Points && Streak == o.Streak && string.Equals(Task, o.Task, StringComparison.OrdinalIgnoreCase);
         }
-        public override string ToString() { return "left=" + Left + " task=" + Task + " points=" + Points + " streak=" + Streak; }
+        public override string ToString() { return "left=" + Left + " task=" + Task + " points=" + Points + " streak=" + Streak + (Minimised ? " (minimised)" : ""); }
     }
 
     /// <summary>Parses the slayer counter widget:
@@ -42,7 +43,6 @@ namespace KavrosSlayerHelper.Core
     {
         static readonly Regex PointsRe = new Regex(@"p\s*[o0]\s*[il1|!]?\s*[nm]\s*[t+]\s*s?\b[^0-9]{0,6}(?<n>[0-9OolI|][0-9OolI|,.\s]*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         static readonly Regex StreakRe = new Regex(@"s\s*t\s*r\s*[e3c]\s*[a4]?\s*[kx]\b[^0-9]{0,6}(?<n>[0-9OolI|][0-9OolI|,.\s]*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        static readonly Regex NumberOnly = new Regex(@"^[\s,.]*(?<n>[0-9OolI|][0-9OolI|,.\s]*)[\s,.]*$", RegexOptions.CultureInvariant);
         static readonly Regex Letters = new Regex(@"[A-Za-z]{3,}", RegexOptions.CultureInvariant);
 
         /// <summary>OCR lines that sit at the same height (a label and its value read apart) become one row.</summary>
@@ -82,22 +82,53 @@ namespace KavrosSlayerHelper.Core
         {
             var r = new CounterRead();
             List<TextLine> rows = Rows(lines);
-            int numberRow = -1;
+            int pointsRow = -1, streakRow = -1;
             for (int i = 0; i < rows.Count; i++)
             {
                 string t = ChatParser.Clean(rows[i].Text);
                 Match m;
-                if ((m = PointsRe.Match(t)).Success)
-                { int n = Num(m.Groups["n"].Value); if (n >= 0) { r.Points = n; continue; } }
-                if ((m = StreakRe.Match(t)).Success)
-                { int n = Num(m.Groups["n"].Value); if (n >= 0) { r.Streak = n; continue; } }
-                if (r.Left < 0 && (m = NumberOnly.Match(t)).Success)
+                if (r.Points < 0 && (m = PointsRe.Match(t)).Success)
+                { int n = Num(m.Groups["n"].Value); if (n >= 0) { r.Points = n; pointsRow = i; continue; } }
+                if (r.Streak < 0 && (m = StreakRe.Match(t)).Success)
+                { int n = Num(m.Groups["n"].Value); if (n >= 0) { r.Streak = n; streakRow = i; } }
+            }
+            // The layout: number, task, points, streak. Work upwards from the labels when they were read, so
+            // stray text above the counter can't pose as the number.
+            int first = pointsRow >= 0 ? pointsRow : streakRow;
+            int numberRow = -1;
+            if (first > 0)
+            {
+                int taskRow = -1;
+                for (int i = first - 1; i >= 0 && i >= first - 2; i--)
                 {
-                    int n = Num(m.Groups["n"].Value);
-                    if (n >= 0 && n < 100000) { r.Left = n; r.NumberLine = rows[i]; numberRow = i; continue; }
+                    string t = ChatParser.Clean(rows[i].Text);
+                    TextLine nl;
+                    int n = NumberToken(rows[i], lines, out nl);
+                    if (n >= 0) { r.Left = n; r.NumberLine = nl; numberRow = i; break; }
+                    if (taskRow < 0 && Letters.IsMatch(t) && !Regex.IsMatch(t, @"\d{2}")) { taskRow = i; r.Task = CleanTask(t); }
                 }
-                if (numberRow >= 0 && r.Task.Length == 0 && i > numberRow && Letters.IsMatch(t) && !Regex.IsMatch(t, @"\d"))
-                    r.Task = CleanTask(t);
+            }
+            else
+            {
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    string t = ChatParser.Clean(rows[i].Text);
+                    if (r.Left < 0)
+                    {
+                        TextLine nl;
+                        int n = NumberToken(rows[i], lines, out nl);
+                        if (n >= 0) { r.Left = n; r.NumberLine = nl; numberRow = i; continue; }
+                    }
+                    else if (r.Task.Length == 0 && Letters.IsMatch(t) && !Regex.IsMatch(t, @"\d{2}")) { r.Task = CleanTask(t); break; }
+                }
+            }
+            // Just a number (no task, points or streak): the minimised counter. The host only trusts it for a
+            // task it already knows.
+            // Any other line that reads as words means this is not the counter.
+            if (r.Left >= 0 && r.Task.Length == 0 && r.Points < 0 && r.Streak < 0)
+            {
+                bool words = rows.Where((row, i) => i != numberRow).Any(row => Regex.IsMatch(ChatParser.Clean(row.Text), @"[A-Za-z]{3,}"));
+                if (words) r.Left = -1; else r.Minimised = true;
             }
             // No separate number row: "135 Dragons" read as one line.
             if (r.Left < 0)
@@ -112,8 +143,31 @@ namespace KavrosSlayerHelper.Core
         static string CleanTask(string t)
         {
             t = Regex.Replace(t, @"[^A-Za-z' \-]", " ");
-            t = Regex.Replace(t, @"\s+", " ").Trim();
-            return t;
+            // Single letters are icon noise ("Soul devourers e"), not part of a task name.
+            t = string.Join(" ", t.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Where(w => w.Length > 1 || w == "a"));
+            return t.Trim();
+        }
+
+        static readonly Regex NumTok = new Regex(@"^[0-9OolI|][0-9OolI|,.]*$", RegexOptions.CultureInvariant);
+
+        /// <summary>The single number in a row (tokens that are short non-letter junk are ignored), or -1.
+        /// Words of more than two letters mean it's not the number row.</summary>
+        static int NumberToken(TextLine row, IEnumerable<TextLine> lines, out TextLine numLine)
+        {
+            numLine = null;
+            string t = ChatParser.Clean(row.Text);
+            int found = -1, count = 0;
+            foreach (string tok in t.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string k = tok.Trim(',', '.', ':', ';');
+                if (k.Length == 0) continue;
+                if (NumTok.IsMatch(k) && Regex.IsMatch(k, @"\d")) { int n = Num(k); if (n >= 0 && n < 100000) { found = n; count++; } continue; }
+                if (Regex.IsMatch(k, @"[A-Za-z]{3,}")) return -1;
+            }
+            if (count != 1) return -1;
+            // Prefer the OCR line that holds just the number (a tighter box for digit learning).
+            numLine = lines.FirstOrDefault(l => l != null && Math.Abs(l.Mid - row.Mid) <= Math.Max(4f, row.H * 0.5f) && Num(l.Text) == found && NumTok.IsMatch(ChatParser.Clean(l.Text).Trim(',', '.', ' '))) ?? row;
+            return found;
         }
     }
 

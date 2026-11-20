@@ -38,6 +38,7 @@ namespace KavrosSlayerHelper.Tests
             Run("finder", FinderTests);
             Run("digits", DigitTests);
             Run("real-fixtures", RealFixtureTests);
+            Run("minimised", MinimisedTests);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }

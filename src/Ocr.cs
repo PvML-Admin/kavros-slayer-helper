@@ -21,6 +21,22 @@ namespace KavrosSlayerHelper
         object engine;          // Windows.Media.Ocr.OcrEngine
         bool initialised;
         public string Unavailable;
+        int maxDimension;
+
+        /// <summary>The largest image side Windows OCR accepts (OcrEngine.MaxImageDimension, 2600 on current Windows).</summary>
+        public int MaxDimension
+        {
+            get
+            {
+                if (maxDimension == 0)
+                {
+                    try { maxDimension = Ready ? (int)WinRtOcr.MaxDimension() : 2600; }
+                    catch (Exception) { maxDimension = 2600; }
+                    if (maxDimension <= 0) maxDimension = 2600;
+                }
+                return maxDimension;
+            }
+        }
 
         public bool Ready
         {
@@ -83,6 +99,9 @@ namespace KavrosSlayerHelper
             if (engine == null) engine = Windows.Media.Ocr.OcrEngine.TryCreateFromUserProfileLanguages();
             return engine;
         }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static uint MaxDimension() { return Windows.Media.Ocr.OcrEngine.MaxImageDimension; }
 
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         public static List<KeyValuePair<string, RectangleF>> Recognize(object engineObj, byte[] png)

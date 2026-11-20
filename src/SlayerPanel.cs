@@ -27,6 +27,8 @@ namespace KavrosSlayerHelper
         bool allowActivate;
 
         public event Action<Hit> Clicked;
+        /// <summary>Right-click on the header (screen point): the hidden menu with "Save debug capture".</summary>
+        public event Action<Point> HeaderMenu;
         public event Action<int> Wheel;             // +1 / -1 on the count
         public event Action<int?> EditFinished;     // the typed count, or null if cancelled
         public event Action EditStarted;
@@ -630,6 +632,11 @@ namespace KavrosSlayerHelper
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Right && e.Y < 38 * OverlayScale)
+            {
+                if (HeaderMenu != null) HeaderMenu(Control.MousePosition);
+                return;
+            }
             if (e.Button != MouseButtons.Left) return;
             pressed = HitAt(e.Location);
             if (pressed != Hit.None) { Present(); return; }

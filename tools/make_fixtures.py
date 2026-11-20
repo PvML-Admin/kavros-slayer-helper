@@ -65,6 +65,57 @@ def dialogue(img, x, y):
     d.rectangle([x + w - 130, y + h - 30, x + w - 20, y + h - 8], fill=(150, 110, 30))
     d.text((x + w - 118, y + h - 28), "Continue", font=ImageFont.truetype(SANS_B, 13), fill=(250, 240, 210))
 
+def distractors(img, seed):
+    """Other RS3-ish yellow-on-dark interface text: an XP tracker box (left-aligned rows), ability-bar
+    cooldown numbers, a buff bar with timers."""
+    rnd = random.Random(seed)
+    d = ImageDraw.Draw(img)
+    f = ImageFont.truetype(SANS, 12)
+    x, y = rnd.randrange(30, 300), rnd.randrange(120, 300)
+    d.rectangle([x, y, x + 150, y + 70], fill=(18, 22, 28))
+    for i, t in enumerate(["Slayer 92", "Attack 99", "Total XP 1,204,331"]):
+        d.text((x + 6, y + 6 + i * 20), t, font=f, fill=YELLOW)
+    bx, by = rnd.randrange(300, 700), 690
+    for i in range(10):
+        d.rectangle([bx + i * 36, by - 4, bx + i * 36 + 32, by + 26], fill=(22, 22, 22))
+        d.text((bx + i * 36 + 8, by + 4), str(rnd.randrange(1, 60)), font=f, fill=YELLOW)
+    ux, uy = rnd.randrange(700, 1000), rnd.randrange(100, 200)
+    for i in range(6):
+        d.rectangle([ux + i * 30, uy, ux + i * 30 + 26, uy + 26], fill=(30, 26, 20))
+        d.text((ux + i * 30 + 4, uy + 14), "%dm" % rnd.randrange(1, 30), font=ImageFont.truetype(SANS, 9), fill=YELLOW)
+
+def real_frames():
+    """The user's real counter crop pasted into busy frames at a few positions and UI scales."""
+    src = os.path.join(ROOT, "real", "counter.png")
+    if not os.path.exists(src):
+        return
+    crop = Image.open(src).convert("RGB")
+    cases = [(1060, 110, 1.0), (40, 400, 1.0), (620, 30, 1.25), (900, 460, 1.5)]
+    for n, (x, y, k) in enumerate(cases, 1):
+        img = terrain(1280, 720, 10 + n)
+        distractors(img, n)
+        c = crop if k == 1.0 else crop.resize((int(crop.width * k), int(crop.height * k)), Image.BICUBIC)
+        img.paste(c, (x, y))
+        img.save(os.path.join(ROOT, "real-pasted-%d.png" % n))
+        with open(os.path.join(ROOT, "real-pasted-%d.txt" % n), "w") as fh:
+            fh.write("%d %d %d %d\n" % (x, y, c.width, c.height))
+
+def minimised_frames():
+    """The user's real minimised counter (just "177" and the skull) pasted into busy frames."""
+    src = os.path.join(ROOT, "real", "counter-minimised.png")
+    if not os.path.exists(src):
+        return
+    crop = Image.open(src).convert("RGB")
+    cases = [(1100, 120, 1.0), (60, 420, 1.0), (700, 40, 1.5)]
+    for n, (x, y, k) in enumerate(cases, 1):
+        img = terrain(1280, 720, 30 + n)
+        distractors(img, 20 + n)
+        c = crop if k == 1.0 else crop.resize((int(crop.width * k), int(crop.height * k)), Image.BICUBIC)
+        img.paste(c, (x, y))
+        img.save(os.path.join(ROOT, "real-minimised-%d.png" % n))
+        with open(os.path.join(ROOT, "real-minimised-%d.txt" % n), "w") as fh:
+            fh.write("%d %d %d %d\n" % (x, y, c.width, c.height))
+
 def main():
     os.makedirs(ROOT, exist_ok=True)
     a = terrain(1280, 720, 1); counter(a, 1060, 120, 135); dialogue(a, 360, 520)
@@ -75,6 +126,8 @@ def main():
     c.save(os.path.join(ROOT, "frame-counter-134.png"))
     e = terrain(1280, 720, 4)
     e.save(os.path.join(ROOT, "frame-empty.png"))
+    real_frames()
+    minimised_frames()
     print("fixtures in", ROOT)
 
 if __name__ == "__main__":

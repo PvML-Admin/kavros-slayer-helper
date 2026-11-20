@@ -25,6 +25,8 @@ sends input to the game.
   off in Companion (WM_CLOSE) hides it immediately and exits.
 - **Rescan** looks for the slayer counter again and re-reads an open master dialogue.
   **Clear** forgets the current task (the streak and points stay).
+- Right-click the header for **Save debug capture**: the last full capture, the counter crop and a report
+  of what was detected go to `%AppData%\KavrosSlayerHelper\debug` (send these if it misreads).
 
 ### Setting the count by hand
 
@@ -48,6 +50,10 @@ Zenity's Clue Helper uses (MIT; see `THIRD_PARTY.txt`):
   runs only when its pixels change, a changed reading must be read the same way twice before it is shown,
   and kills are usually read by matching the big digits against templates learned from earlier reads (no
   OCR at all). If it disappears for a few seconds the last values stay and it is looked for again.
+  **Minimised**, the counter is just a small dark box with the yellow kills-left number and the slayer skull
+  at its top-right; that form is found too (the skull is required, so ability-bar and buff timers aren't
+  mistaken for it) and the kills left keep counting down from it, with the last task, points and streak kept.
+  A bare number is only used once a task is known (from the expanded counter or a master's dialogue).
 - **The slayer master's dialogue** (parchment box, master's name in gold at the top, portrait on the left).
   It is found by its parchment colour every other second and read once per appearance, line wraps undone:
   `Your new task is to kill 125 Dragons.`, `Your task is to kill …`, `… kill 40 more Dragons` (progress), the

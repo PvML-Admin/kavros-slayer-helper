@@ -191,6 +191,7 @@ namespace KavrosSlayerHelper.Core
         {
             if (r == null || !r.Valid) return false;
             SlayerState s = State;
+            if (r.Minimised && !s.HasTask) return false;     // a bare number means nothing without a task
             bool changed = false;
             string name = s.Monster ?? "";
             if (!string.IsNullOrEmpty(r.Task))

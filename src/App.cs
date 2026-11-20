@@ -55,6 +55,7 @@ namespace KavrosSlayerHelper
 
             panel = new SlayerPanel { Compact = settings.Compact, Minimised = settings.Minimised };
             panel.Clicked += OnPanelClick;
+            panel.HeaderMenu += OnHeaderMenu;
             panel.Wheel += d => { if (tracker.Adjust(d)) Changed(); };
             panel.EditFinished += OnEditFinished;
             panel.DragMoved += OnDragMoved;
@@ -221,6 +222,40 @@ namespace KavrosSlayerHelper
                 case SlayerPanel.Hit.Minus: if (tracker.Adjust(-1)) Changed(); break;
                 case SlayerPanel.Hit.Plus: if (tracker.Adjust(1)) Changed(); break;
             }
+        }
+
+        ContextMenuStrip headerMenu;
+
+        /// <summary>Hidden right-click menu on the header: save what the reader sees, for bug reports.</summary>
+        void OnHeaderMenu(Point at)
+        {
+            if (headerMenu == null)
+            {
+                headerMenu = new ContextMenuStrip { ShowImageMargin = false };
+                headerMenu.Items.Add("Save debug capture", null, (o, e) => SaveDebugCapture());
+                headerMenu.Items.Add("Open debug folder", null, (o, e) =>
+                {
+                    try { Directory.CreateDirectory(DebugDir); System.Diagnostics.Process.Start("explorer.exe", "\"" + DebugDir + "\""); }
+                    catch (Exception ex) { Log.Write("debug: open folder failed: " + ex.Message); }
+                });
+            }
+            headerMenu.Show(at);
+        }
+
+        static string DebugDir { get { return Path.Combine(Settings.Folder, "debug"); } }
+
+        void SaveDebugCapture()
+        {
+            try
+            {
+                string state = "tracker state: " + MiniJson.Write(tracker.State.ToJson()) + "\nfilter accepted: " +
+                    (counterFilter.Accepted != null ? counterFilter.Accepted.ToString() : "none");
+                string path = reader.SaveDebug(DebugDir, state);
+                if (path == null) { Log.Write("debug: nothing captured yet"); MessageBox.Show("Nothing captured yet. Open the game in front and try again.", "Kavros Slayer Helper"); return; }
+                Log.Write("debug: saved " + path);
+                System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + path + "\"");
+            }
+            catch (Exception ex) { Log.Write("debug: save failed: " + ex); }
         }
 
         void OnEditFinished(int? value)

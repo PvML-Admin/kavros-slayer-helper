@@ -212,5 +212,105 @@ namespace KavrosSlayerHelper.Tests
                 Console.WriteLine("  real counter: " + string.Join(", ", c) + " in " + img.W + "x" + img.H);
             }
         }
+
+        // ---- the minimised counter ------------------------------------------------------------------
+        static void MinimisedTests()
+        {
+            // The user's expanded counter as Windows OCR splits it (labels and values apart, skull junk).
+            var x = CounterParser.Parse(new[] { L("249 @", 14, 40, 44, 22), L("Soul devourers", 40, 30, 110), L("Slayer points:", 62, 6, 90), L("6,257", 62, 150, 40), L("Task streak:", 80, 6, 80), L("291", 80, 165, 24) });
+            Eq(249, x.Left, "real layout: left"); Eq("Soul devourers", x.Task, "real layout: task"); Eq(6257, x.Points, "real layout: points"); Eq(291, x.Streak, "real layout: streak");
+            Ok(!x.Minimised, "real layout: expanded");
+            var tt = NewTracker(Data());
+            Ok(tt.ApplyCounter(x), "real layout applied"); Eq("Soul devourers", tt.State.Monster, "soul devourers in the data");
+
+            // Parsing: a lone number (the skull icon may read as a stray symbol) is the minimised counter.
+            var r = CounterParser.Parse(new[] { L("177", 6, 20, 30, 14) });
+            Ok(r.Valid && r.Minimised, "lone number: minimised counter"); Eq(177, r.Left, "minimised left");
+            Ok(r.NumberLine != null, "number line kept for digit learning");
+            r = CounterParser.Parse(new[] { L("177 &", 6, 20, 40, 14) });
+            Ok(r.Valid && r.Minimised && r.Left == 177, "icon junk beside the number");
+            r = CounterParser.Parse(new[] { L("1,177", 6) });
+            Eq(1177, r.Left, "minimised with a thousands comma");
+            r = CounterParser.Parse(new[] { L("135", 4), L("Dragons", 34), L("Slayer points: 6,257", 60), L("Task streak: 291", 80) });
+            Ok(!r.Minimised, "expanded counter is not minimised");
+            r = CounterParser.Parse(new[] { L("Hello", 4), L("12", 20) });
+            Ok(!r.Valid, "a number next to words is not the minimised counter");
+
+            // Applying: keeps the task, points and streak; counts down; ignored without a task.
+            var d = Data();
+            var t = NewTracker(d);
+            Ok(!t.ApplyCounter(new CounterRead { Left = 177, Minimised = true }), "no task: minimised ignored");
+            Ok(!t.State.HasTask && t.State.Left < 0, "no task: nothing set");
+            Ok(t.ApplyCounter(new CounterRead { Left = 249, Task = "Soul devourers", Points = 6257, Streak = 291 }), "expanded first");
+            Ok(t.ApplyCounter(new CounterRead { Left = 177, Minimised = true }), "minimised applied");
+            Eq("Soul devourers", t.State.Monster, "task kept"); Eq(177, t.State.Left, "kills left from the minimised counter");
+            Eq(249, t.State.Assigned, "assigned kept"); Eq(6257, t.State.Points, "points kept"); Eq(291, t.State.Streak, "streak kept");
+            Ok(t.ApplyCounter(new CounterRead { Left = 176, Minimised = true }), "minimised counts down");
+            Eq(176, t.State.Left, "176 left"); Eq("73 killed", PanelView.Build(t, "").KilledText, "killed while minimised");
+            Ok(!t.ApplyCounter(new CounterRead { Left = 176, Minimised = true }), "same minimised reading: no change");
+            Ok(t.ApplyCounter(new CounterRead { Left = 175, Task = "Soul devourers", Points = 6257, Streak = 291 }), "expanded again");
+            Eq(175, t.State.Left, "expanded continues the count");
+            Ok(t.ApplyCounter(new CounterRead { Left = 0, Minimised = true }), "minimised zero");
+            Ok(t.State.Complete, "zero on the minimised counter = complete");
+
+            // The filter treats minimised reads like any other: a change waits for a second read.
+            var f = new CounterFilter();
+            Ok(f.Offer(new CounterRead { Left = 249, Task = "Soul devourers", Points = 6257, Streak = 291 }, true) == null, "filter: first wait");
+            Ok(f.Offer(new CounterRead { Left = 249, Task = "Soul devourers", Points = 6257, Streak = 291 }, true) != null, "filter: confirmed");
+            Ok(f.Offer(new CounterRead { Left = 177, Minimised = true }, true) == null, "filter: minimised waits");
+            Ok(f.Offer(new CounterRead { Left = 177, Minimised = true }, true) != null, "filter: minimised confirmed");
+
+            // Detection on the real minimised counter.
+            string dir = Path.Combine(AppContext.BaseDirectory, "fixtures", "real");
+            string mini = Path.Combine(dir, "counter-minimised.png");
+            if (!File.Exists(mini)) { Console.WriteLine("  minimised: no real fixture (skipped)"); return; }
+            RgbImage img = Png.Load(mini);
+            var c = WidgetFinder.FindMinimisedCounters(img);
+            Ok(c.Count == 1, "real minimised counter: one candidate (got " + c.Count + ")");
+            if (c.Count > 0)
+            {
+                Box n = c[0].Text;
+                Console.WriteLine("  real minimised: number at " + n + ", region " + c[0].Region + " in " + img.W + "x" + img.H);
+                Ok(n.X >= 25 && n.X <= 35 && n.Y >= 15 && n.Y <= 22 && n.W >= 18 && n.W <= 26 && n.H >= 8 && n.H <= 13, "real minimised: number box around 177");
+                Eq(3, DigitReader.Glyphs(img, n.Inflate(1, 1)).Count, "real minimised: three digits");
+                var dr = new DigitReader();
+                Ok(dr.Learn(img, n.Inflate(2, 2), "177"), "real minimised: digits learned");
+                Eq(177, dr.Read(img, n.Inflate(2, 2)), "real minimised: read back by template");
+            }
+            // Pasted into busy frames (with ability-bar and buff numbers on dark squares).
+            for (int k = 1; k <= 3; k++)
+            {
+                string f2 = Fixture("real-minimised-" + k + ".png");
+                if (!File.Exists(f2)) continue;
+                int[] at = File.ReadAllText(Path.ChangeExtension(f2, ".txt")).Split(' ').Select(int.Parse).ToArray();
+                var truth = new Box(at[0], at[1], at[2], at[3]);
+                RgbImage fr = Png.Load(f2);
+                var mc = WidgetFinder.FindMinimisedCounters(fr);
+                Ok(mc.Count >= 1, "minimised frame " + k + ": found");
+                if (mc.Count > 0)
+                {
+                    Ok(!mc[0].Text.Intersect(truth).IsEmpty, "minimised frame " + k + ": best candidate is the counter (" + mc[0].Text + " vs " + truth + ")");
+                    Ok(mc[0].Region.Intersect(mc[0].Text).W == mc[0].Text.W, "minimised frame " + k + ": region holds the number");
+                }
+                Eq(1, mc.Count, "minimised frame " + k + ": no distractors");
+            }
+            // The expanded counter is not mistaken for the minimised one first.
+            string exp = Path.Combine(dir, "counter.png");
+            if (File.Exists(exp))
+            {
+                var ec = WidgetFinder.FindCounters(Png.Load(exp));
+                Ok(ec.Count > 0, "expanded real counter still found");
+            }
+            // The real expanded counter pasted into busy frames: the best candidate is the counter.
+            for (int k = 1; k <= 4; k++)
+            {
+                string f3 = Fixture("real-pasted-" + k + ".png");
+                if (!File.Exists(f3)) continue;
+                int[] at = File.ReadAllText(Path.ChangeExtension(f3, ".txt")).Split(' ').Select(int.Parse).ToArray();
+                var truth = new Box(at[0], at[1], at[2], at[3]);
+                var ec = WidgetFinder.FindCounters(Png.Load(f3));
+                Ok(ec.Count > 0 && !ec[0].Region.Intersect(truth).IsEmpty, "expanded frame " + k + ": best candidate is the counter" + (ec.Count > 0 ? " (" + ec[0].Region + " vs " + truth + ")" : ""));
+            }
+        }
     }
 }
