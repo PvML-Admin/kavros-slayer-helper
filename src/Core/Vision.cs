@@ -70,7 +70,8 @@ namespace KavrosSlayerHelper.Core
         /// <summary>The slayer counter's yellow (number, task name, values).</summary>
         public static bool Yellow(int r, int g, int b)
         {
-            return r >= 170 && g >= 140 && b <= 110 && r - b >= 100 && g * 10 >= r * 6 && Math.Abs(r - g) <= 90;
+            // The interface yellow is (255,203,5) with almost no blue; desert sand (240,193,93) is not text.
+            return r >= 170 && g >= 140 && b <= 60 && r - b >= 130 && g * 10 >= r * 6 && Math.Abs(r - g) <= 90;
         }
 
         /// <summary>The dialogue box parchment (light tan).</summary>
@@ -152,7 +153,8 @@ namespace KavrosSlayerHelper.Core
                             else if (Colours.Luma(r, g, b) < 95) dark++;
                             else other++;
                         }
-                    on[cy * cw + cx] = yellow >= 1 && dark >= other;   // yellow on dark, not on parchment or sky
+                    // Yellow on dark, not on parchment, sky or sand: the cell is mostly dark background.
+                    on[cy * cw + cx] = yellow >= 1 && dark >= other && dark * 3 >= cell * cell;
                 }
             // Glyph cells -> text blobs (bridge the gaps between letters with a horizontal dilation).
             var grown = new bool[cw * ch];
@@ -172,6 +174,8 @@ namespace KavrosSlayerHelper.Core
                 blobs.Add(Tight(img, new Box(b.X * cell, b.Y * cell, b.W * cell, b.H * cell)));
             }
             blobs.RemoveAll(b => b.IsEmpty || b.H < 5);
+            // Rows closer than a grid cell merge into one blob: split blobs at pixel rows without yellow.
+            blobs = blobs.SelectMany(b => SplitRows(img, b)).Where(b => !b.IsEmpty && b.H >= 5).ToList();
             // Group blobs into stacks: rows close below each other and overlapping horizontally (or right-aligned values).
             blobs.Sort((a, b) => a.Y.CompareTo(b.Y));
             var used = new bool[blobs.Count];
@@ -189,6 +193,9 @@ namespace KavrosSlayerHelper.Core
                     if (gap > Math.Max(last.H, b.H) * 2 + 6) { if (b.Y > all.Bottom + 120) break; continue; }
                     bool overlap = b.X < all.Right + 60 && b.Right > all.X - 60;
                     if (!overlap) continue;
+                    // A separate box above or below (the RS3 clock sits right on top of the counter): the
+                    // band between the rows must be the same dark box, not game scene.
+                    if (!DarkBetween(img, last, b)) { if (stack.Count == 1) { stack[0] = b; all = b; used[j] = true; } continue; }
                     stack.Add(b); used[j] = true; all = all.Union(b);
                 }
                 if (stack.Count < 2) continue;
@@ -219,6 +226,61 @@ namespace KavrosSlayerHelper.Core
             }
             result.Sort((a, b) => b.Score.CompareTo(a.Score));
             return result;
+        }
+
+        /// <summary>Splits a blob into text rows at pixel rows with no yellow (gaps of 2+ px).</summary>
+        static IEnumerable<Box> SplitRows(RgbImage img, Box b)
+        {
+            b = b.Intersect(new Box(0, 0, img.W, img.H));
+            var counts = new int[b.H];
+            for (int y = 0; y < b.H; y++)
+                for (int x = b.X; x < b.Right; x++)
+                {
+                    int i = ((b.Y + y) * img.W + x) * 3;
+                    if (Colours.Yellow(img.Px[i], img.Px[i + 1], img.Px[i + 2])) counts[y]++;
+                }
+            int start = -1, gap = 0;
+            var runs = new List<int[]>();
+            for (int y = 0; y <= b.H; y++)
+            {
+                bool ink = y < b.H && counts[y] > 0;
+                if (ink) { if (start < 0) start = y; gap = 0; }
+                else if (start >= 0)
+                {
+                    gap++;
+                    if (gap >= 2 || y == b.H) { runs.Add(new[] { start, y - gap + 1 }); start = -1; gap = 0; }
+                }
+            }
+            if (runs.Count <= 1) { yield return b; yield break; }
+            foreach (int[] r in runs)
+                yield return Tight(img, new Box(b.X, b.Y + r[0], b.W, r[1] - r[0]));
+        }
+
+        /// <summary>True when every pixel row between <paramref name="a"/> (above) and <paramref name="b"/> is
+        /// mostly dark across their shared columns (one box), false when scene shows through between them.</summary>
+        static bool DarkBetween(RgbImage img, Box a, Box b)
+        {
+            // The shared columns (labels sit left of the values, so they stay out of this band).
+            int x0 = Math.Max(a.X, b.X), x1 = Math.Min(a.Right, b.Right);
+            if (x1 - x0 < 6) { Box n = a.W <= b.W ? a : b; x0 = n.X; x1 = n.Right; }
+            x0 = Math.Max(0, x0); x1 = Math.Min(img.W, x1);
+            int light = 0;
+            for (int y = a.Bottom; y < b.Y && y < img.H; y++)
+            {
+                if (y < 0) continue;
+                int dark = 0, n = 0;
+                for (int x = x0; x < x1; x++)
+                {
+                    int i = (y * img.W + x) * 3;
+                    int r = img.Px[i], g = img.Px[i + 1], bl = img.Px[i + 2];
+                    n++;
+                    if (Colours.Luma(r, g, bl) < 60 || Colours.Yellow(r, g, bl)) dark++;
+                }
+                // A 1-2 px separator line inside the box is fine; 3+ rows of scene mean two boxes.
+                if (n > 0 && dark * 2 < n) { if (++light >= 3) return false; }
+                else light = 0;
+            }
+            return true;
         }
 
         /// <summary>The minimised slayer counter: one short yellow number on a small dark box, the slayer skull
@@ -253,6 +315,9 @@ namespace KavrosSlayerHelper.Core
                 if (cb.H > 10 || cb.W > 30) continue;
                 Box t = Tight(img, new Box(cb.X * cell, cb.Y * cell, cb.W * cell, cb.H * cell));
                 if (t.IsEmpty || t.H < 7 || t.H > 40 || t.W < 4 || t.W > t.H * 5) continue;
+                if (SplitRows(img, t).Count() > 1) continue;                     // one line only
+                // Nothing else yellow nearby: the expanded counter's values have rows above and below.
+                if (YellowPixels(img, new Box(t.X - t.H / 2, t.Y - t.H * 2, t.W + t.H, t.H * 5), t) * 10 > YellowPixels(img, t, Box.Empty) * 3) continue;
                 List<Box> glyphs = DigitReader.Glyphs(img, t.Inflate(1, 1));
                 if (glyphs.Count < 1 || glyphs.Count > 5) continue;
                 if (glyphs.Any(g => g.W > g.H * 1.2)) continue;                  // digits are taller than wide
@@ -271,6 +336,20 @@ namespace KavrosSlayerHelper.Core
             }
             result.Sort((a, b) => b.Score.CompareTo(a.Score));
             return result;
+        }
+
+        static int YellowPixels(RgbImage img, Box r, Box hole)
+        {
+            r = r.Intersect(new Box(0, 0, img.W, img.H));
+            int n = 0;
+            for (int y = r.Y; y < r.Bottom; y++)
+                for (int x = r.X; x < r.Right; x++)
+                {
+                    if (hole.Contains(x, y)) continue;
+                    int i = (y * img.W + x) * 3;
+                    if (Colours.Yellow(img.Px[i], img.Px[i + 1], img.Px[i + 2])) n++;
+                }
+            return n;
         }
 
         static double DarkShare(RgbImage img, Box ring, Box hole)
@@ -470,6 +549,21 @@ namespace KavrosSlayerHelper.Core
             }
             return true;
         }
+
+        /// <summary>A copy of the learned shapes (for building the built-in font).</summary>
+        public Dictionary<char, float[]> Export()
+        {
+            return templates.ToDictionary(kv => kv.Key, kv => (float[])kv.Value.Clone());
+        }
+
+        /// <summary>Adds shapes for digits not learned yet (a learned shape always wins).</summary>
+        public void Seed(char digit, float[] shape)
+        {
+            if (shape != null && shape.Length == TW * TH && !templates.ContainsKey(digit)) templates[digit] = (float[])shape.Clone();
+        }
+
+        /// <summary>The glyph count of the number in the row.</summary>
+        public static int GlyphCount(RgbImage img, Box row) { return Glyphs(img, row).Count; }
 
         /// <summary>The number in the row, or -1 if any glyph isn't a confident match.</summary>
         public int Read(RgbImage img, Box row)

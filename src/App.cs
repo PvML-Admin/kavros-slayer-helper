@@ -70,6 +70,7 @@ namespace KavrosSlayerHelper
             client.ForegroundChanged += OnForegroundChanged;
             client.Polled += KeepAboveGame;
 
+            counterFilter.Resolve = t => { MonsterInfo m = data.FindMonster(t); return m != null ? m.Name : ""; };
             reader = new WidgetReader(OnReadWorker, () => confirmWanted, settings.CounterRegion) { IntervalMs = settings.ScanMs };
             panel.Move += (s, e) => reader.SetExclude(panel.Visible ? panel.Bounds : Rectangle.Empty);
             panel.Resize += (s, e) => reader.SetExclude(panel.Visible ? panel.Bounds : Rectangle.Empty);
@@ -189,10 +190,14 @@ namespace KavrosSlayerHelper
             }
             if (r.Counter != null)
             {
-                CounterRead ok = r.CounterDirect ? counterFilter.Accept(r.Counter) : counterFilter.Offer(r.Counter, tracker.State.HasTask);
+                // Every reading goes through the filter: the same value on consecutive frames, and only small
+                // steps down unless a new task shows up. The panel never counts down by itself meanwhile.
+                CounterRead ok = counterFilter.Offer(r.Counter, tracker.State);
+                if (ok == null && counterFilter.NeedsConfirm && !counterFilter.Plausible(r.Counter, tracker.State) && counterFilter.PendingCount == 1)
+                    Log.Write("counter: held back an unlikely reading (" + r.Counter + " by " + r.CounterBy + "; panel has " + tracker.State.Left + ")");
                 if (ok != null)
                 {
-                    if (Log.Verbose) Log.Write("counter: " + ok);
+                    Log.Write("counter: " + ok + " (by " + r.CounterBy + ")");
                     if (tracker.ApplyCounter(ok)) changed = true;
                 }
             }

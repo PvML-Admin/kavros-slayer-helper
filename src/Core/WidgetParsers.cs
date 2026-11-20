@@ -142,6 +142,8 @@ namespace KavrosSlayerHelper.Core
 
         static string CleanTask(string t)
         {
+            // Digits inside a word are OCR slips for letters ("Dem0ns", "Abyssa1"), not separators.
+            t = Regex.Replace(t, @"(?<=[A-Za-z])[0-9|]+|[0-9|]+(?=[A-Za-z])", mm => mm.Value.Replace('0', 'o').Replace('1', 'l').Replace('|', 'l').Replace('5', 's').Replace('8', 'B'));
             t = Regex.Replace(t, @"[^A-Za-z' \-]", " ");
             // Single letters are icon noise ("Soul devourers e"), not part of a task name.
             t = string.Join(" ", t.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Where(w => w.Length > 1 || w == "a"));
@@ -217,32 +219,62 @@ namespace KavrosSlayerHelper.Core
     /// <summary>Only lets a counter reading through once it has been read the same way twice in a row
     /// (a single misread digit never reaches the panel). The very first reading passes straight away
     /// when nothing is known yet.</summary>
+    /// <summary>Decides when a counter reading is adopted. A change must be read the same way on
+    /// <see cref="Confirmations"/> consecutive frames. It must also be plausible: kills left only go down,
+    /// by at most <see cref="MaxStep"/> between adopted readings, unless a new task shows up (a different
+    /// task name, or none known yet). An implausible reading (247 read as 99, or a jump up to 260) is only
+    /// adopted if it stays the same for <see cref="ImplausibleConfirmations"/> frames in a row, so a bad
+    /// earlier value can still be corrected by the counter, which is the truth.</summary>
     public sealed class CounterFilter
     {
+        public int Confirmations = 2;
+        public int ImplausibleConfirmations = 8;
+        public int MaxStep = 20;
+        /// <summary>Task text as read -> the known task name, "" when it can't be placed.</summary>
+        public Func<string, string> Resolve = t => t ?? "";
+
         CounterRead pending, accepted;
+        int pendingCount;
         public bool NeedsConfirm { get { return pending != null; } }
         public CounterRead Accepted { get { return accepted; } }
+        public int PendingCount { get { return pendingCount; } }
 
-        public CounterRead Offer(CounterRead r, bool haveState)
+        string Task(CounterRead r) { return r.Minimised || string.IsNullOrEmpty(r.Task) ? "" : (Resolve(r.Task) ?? ""); }
+
+        /// <summary>The values that matter, with unread points/streak/task filled from the adopted reading.</summary>
+        string Key(CounterRead r)
         {
-            if (r == null || !r.Valid) return null;
-            if (accepted != null && r.SameValues(accepted)) { pending = null; return null; }
-            if (accepted == null && !haveState) { accepted = r; pending = null; return r; }
-            if (pending != null && r.SameValues(pending)) { accepted = r; pending = null; return r; }
-            pending = r;
-            return null;
+            int p = r.Points >= 0 ? r.Points : accepted != null ? accepted.Points : -1;
+            int st = r.Streak >= 0 ? r.Streak : accepted != null ? accepted.Streak : -1;
+            string t = Task(r);
+            if (t.Length == 0 && accepted != null) t = Task(accepted);
+            return r.Left + "|" + p + "|" + st + "|" + t.ToLowerInvariant();
         }
 
-        /// <summary>A reading that is already trusted (digit templates checked against the last value).</summary>
-        public CounterRead Accept(CounterRead r)
+        public CounterRead Offer(CounterRead r, SlayerState state)
         {
             if (r == null || !r.Valid) return null;
-            pending = null;
-            if (accepted != null && r.SameValues(accepted)) return null;
-            accepted = r;
+            string k = Key(r);
+            if (accepted != null && k == Key(accepted)) { pending = null; pendingCount = 0; return null; }
+            if (pending != null && k == Key(pending)) pendingCount++;
+            else { pending = r; pendingCount = 1; }
+            int need = Plausible(r, state) ? Confirmations : ImplausibleConfirmations;
+            if (pendingCount < need) return null;
+            accepted = r; pending = null; pendingCount = 0;
             return r;
         }
 
-        public void Reset() { pending = null; accepted = null; }
+        /// <summary>Kills left going down by a small step, the same count, or a new task.</summary>
+        public bool Plausible(CounterRead r, SlayerState s)
+        {
+            if (s == null || !s.HasTask || s.Left < 0) return true;
+            string task = Task(r);
+            if (task.Length > 0 && !string.Equals(task, s.Monster, StringComparison.OrdinalIgnoreCase)) return true;
+            if (s.Complete && task.Length > 0) return true;           // a new task of the same kind after finishing one
+            int step = s.Left - r.Left;
+            return step >= 0 && step <= MaxStep;
+        }
+
+        public void Reset() { pending = null; accepted = null; pendingCount = 0; }
     }
 }

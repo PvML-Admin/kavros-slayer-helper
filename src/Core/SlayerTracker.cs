@@ -76,6 +76,14 @@ namespace KavrosSlayerHelper.Core
         {
             Data = data;
             State = state ?? new SlayerState();
+            // A task saved under a name that isn't in the data (an OCR misread kept by 0.1.2): put the right
+            // name back when it can be placed, otherwise drop a counter-made one.
+            if (State.HasTask && !Data.Monsters.Values.Any(m => m.Name == State.Monster))
+            {
+                MonsterInfo m = Data.FindMonster(State.Monster);
+                if (m != null) State.Monster = m.Name;
+                else if (State.LastSource == "counter") { State.Monster = ""; State.Left = -1; State.Assigned = 0; State.Complete = false; }
+            }
         }
 
         public MonsterInfo Monster { get { return State.HasTask ? Data.FindMonster(State.Monster) : null; } }
@@ -197,9 +205,9 @@ namespace KavrosSlayerHelper.Core
             if (!string.IsNullOrEmpty(r.Task))
             {
                 MonsterInfo m = Data.FindMonster(r.Task);
-                // A task name OCR couldn't place never replaces a known task (it is more likely a misread).
+                // A task name OCR couldn't place in the data is never used: not to replace a known task, and not
+                // to start one either (0.1.2 showed "Abyssal Oerm" for a misread "Abyssal Demons").
                 if (m != null) name = m.Name;
-                else if (!s.HasTask) name = Canonical(r.Task);
             }
             if (name.Length == 0) name = s.Monster ?? "";
             if (name.Length > 0 && name != s.Monster)

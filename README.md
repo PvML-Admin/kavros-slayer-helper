@@ -50,6 +50,12 @@ Zenity's Clue Helper uses (MIT; see `THIRD_PARTY.txt`):
   runs only when its pixels change, a changed reading must be read the same way twice before it is shown,
   and kills are usually read by matching the big digits against templates learned from earlier reads (no
   OCR at all). If it disappears for a few seconds the last values stay and it is looked for again.
+  The number is read by digit shapes taken from real counter screenshots (`src/Core/DigitFont.cs`); a
+  digit they don't know is OCR'd on its own and must agree with the whole-box read. A changed count is only
+  shown after two frames in a row agree, and only if it went down by a small step (up to 20) or a new task
+  appeared; anything else (a misread 99, a jump up) must hold for 8 frames before it replaces the count.
+  The panel never counts down by itself while the counter is on screen. Task names are matched to the
+  wiki data with OCR look-alikes allowed (O/D, 0/o, l/1, rn/m); a name that can't be placed is never shown.
   **Minimised**, the counter is just a small dark box with the yellow kills-left number and the slayer skull
   at its top-right; that form is found too (the skull is required, so ability-bar and buff timers aren't
   mistaken for it) and the kills left keep counting down from it, with the last task, points and streak kept.

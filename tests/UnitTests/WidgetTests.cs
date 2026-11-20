@@ -81,16 +81,19 @@ namespace KavrosSlayerHelper.Tests
             r = CounterParser.Parse(new[] { L("Hello", 4), L("12", 20) });
             Ok(!r.Valid, "a lone number is not a counter");
 
-            // The filter: one misread never lands; the first reading with no state does.
+            // The filter: a change must be read the same way on two frames in a row.
             var f = new CounterFilter();
+            var none = new SlayerState();
             var a = new CounterRead { Left = 135, Task = "Dragons", Points = 6257, Streak = 291 };
-            Ok(f.Offer(a, false) != null, "first reading passes");
-            var b = new CounterRead { Left = 184, Task = "Dragons", Points = 6257, Streak = 291 };
-            Ok(f.Offer(b, true) == null && f.NeedsConfirm, "a change waits for a second read");
-            var c = new CounterRead { Left = 134, Task = "Dragons", Points = 6257, Streak = 291 };
-            Ok(f.Offer(c, true) == null, "a different second read waits again");
-            Ok(f.Offer(c, true) != null && !f.NeedsConfirm, "confirmed");
-            Ok(f.Offer(c, true) == null, "unchanged: nothing to apply");
+            Ok(f.Offer(a, none) == null && f.NeedsConfirm, "first reading waits for a second frame");
+            Ok(f.Offer(a, none) != null, "two frames agree: adopted");
+            var st = new SlayerState { Monster = "Dragons", Left = 135, Assigned = 135 };
+            var b = new CounterRead { Left = 134, Task = "Dragons", Points = 6257, Streak = 291 };
+            var c = new CounterRead { Left = 133, Task = "Dragons", Points = 6257, Streak = 291 };
+            Ok(f.Offer(b, st) == null && f.NeedsConfirm, "a change waits for a second read");
+            Ok(f.Offer(c, st) == null, "a different second read waits again");
+            Ok(f.Offer(c, st) != null && !f.NeedsConfirm, "confirmed");
+            Ok(f.Offer(c, st) == null, "unchanged: nothing to apply");
         }
 
         static void CounterApplyTests()
@@ -255,10 +258,12 @@ namespace KavrosSlayerHelper.Tests
 
             // The filter treats minimised reads like any other: a change waits for a second read.
             var f = new CounterFilter();
-            Ok(f.Offer(new CounterRead { Left = 249, Task = "Soul devourers", Points = 6257, Streak = 291 }, true) == null, "filter: first wait");
-            Ok(f.Offer(new CounterRead { Left = 249, Task = "Soul devourers", Points = 6257, Streak = 291 }, true) != null, "filter: confirmed");
-            Ok(f.Offer(new CounterRead { Left = 177, Minimised = true }, true) == null, "filter: minimised waits");
-            Ok(f.Offer(new CounterRead { Left = 177, Minimised = true }, true) != null, "filter: minimised confirmed");
+            var s0 = new SlayerState();
+            Ok(f.Offer(new CounterRead { Left = 249, Task = "Soul devourers", Points = 6257, Streak = 291 }, s0) == null, "filter: first wait");
+            Ok(f.Offer(new CounterRead { Left = 249, Task = "Soul devourers", Points = 6257, Streak = 291 }, s0) != null, "filter: confirmed");
+            var s1 = new SlayerState { Monster = "Soul devourers", Left = 249, Assigned = 249 };
+            Ok(f.Offer(new CounterRead { Left = 248, Minimised = true }, s1) == null, "filter: minimised waits");
+            Ok(f.Offer(new CounterRead { Left = 248, Minimised = true }, s1) != null, "filter: minimised confirmed (task kept)");
 
             // Detection on the real minimised counter.
             string dir = Path.Combine(AppContext.BaseDirectory, "fixtures", "real");
@@ -311,6 +316,134 @@ namespace KavrosSlayerHelper.Tests
                 var ec = WidgetFinder.FindCounters(Png.Load(f3));
                 Ok(ec.Count > 0 && !ec[0].Region.Intersect(truth).IsEmpty, "expanded frame " + k + ": best candidate is the counter" + (ec.Count > 0 ? " (" + ec[0].Region + " vs " + truth + ")" : ""));
             }
+        }
+
+        // ---- 0.1.3 regressions from real screenshots -------------------------------------------------
+        static void RegressionTests()
+        {
+            var d = Data();
+            // "Abyssal Oerm": OCR read the D of Demons as O and lost the end; 0.1.2 showed the raw read.
+            Eq("Abyssal demons", d.FindMonster("Abyssal Oerm")?.Name, "Abyssal Oerm -> Abyssal demons");
+            Eq("Abyssal demons", d.FindMonster("Abyssal Oemons")?.Name, "O for D");
+            Eq("Abyssal demons", d.FindMonster("Abyssal Dernons")?.Name, "rn for m");
+            Eq("Abyssal demons", d.FindMonster("Abyssa1 Demons")?.Name, "1 for l");
+            Eq("Abyssal demons", d.FindMonster("ABYSSAL DEMONS")?.Name, "caps");
+            Eq("Abyssal demons", d.FindMonster("Abyssal Demon")?.Name, "singular");
+            Eq("Soul devourers", d.FindMonster("Soul devourers")?.Name, "soul devourers");
+            Eq("Soul devourers", d.FindMonster("Soul dev0urers")?.Name, "0 for o");
+            Eq("Soul devourers", d.FindMonster("Soul devourer")?.Name, "soul devourer singular");
+            Ok(d.FindMonster("Abyssal") == null, "ambiguous 'Abyssal' is not guessed");
+            Ok(d.FindMonster("Oerm") == null, "'Oerm' alone is nothing");
+            Ok(d.FindMonster("Hello world") == null, "unrelated words are nothing");
+            Ok(d.FindMonster("Abyssal Oerm") != null && d.Monsters.Values.All(m => m.Name != "Abyssal Oerm"), "'Abyssal Oerm' isn't in the data");
+            int self = 0;
+            foreach (var m in d.Monsters.Values) if (d.FindMonster(m.Name) == m) self++;
+            Eq(d.Monsters.Count, self, "every task name finds itself (no look-alike collisions)");
+
+            // Digits inside a word are letters.
+            var r = CounterParser.Parse(new[] { L("196", 14, 40, 24, 10), L("Abyssal Dem0ns", 30, 10, 90, 11), L("Slayer points:", 50, 0, 80), L("6,301", 50, 100, 28), L("Task streak:", 66, 0, 70), L("293", 66, 110, 17) });
+            Eq("Abyssal Demons", r.Task, "Dem0ns cleaned");
+
+            // The tracker never invents a task from an unmatched counter read, and repairs a saved misread.
+            var t = NewTracker(d);
+            Ok(!t.ApplyCounter(new CounterRead { Left = 196, Task = "Qwxz Vbnm", Points = 6301, Streak = 293 }) || !t.State.HasTask, "unknown counter task not used");
+            Ok(!t.State.HasTask, "no task from an unknown name");
+            Ok(t.ApplyCounter(new CounterRead { Left = 196, Task = "Abyssal Oerm", Points = 6301, Streak = 293 }), "misread resolves");
+            Eq("Abyssal demons", t.State.Monster, "resolved to the data name");
+            var saved = new SlayerState { Monster = "Abyssal Oerm", Left = 196, Assigned = 196, LastSource = "counter" };
+            Eq("Abyssal demons", new SlayerTracker(d, saved).State.Monster, "saved misread repaired on load");
+            var junk = new SlayerState { Monster = "Qwxz Vbnm", Left = 5, Assigned = 9, LastSource = "counter" };
+            Ok(!new SlayerTracker(d, junk).State.HasTask, "saved unplaceable counter name dropped");
+
+            // The real screenshots: the counter's rows (not the clock above it) and its number by digit shapes.
+            string dir = Path.Combine(AppContext.BaseDirectory, "fixtures", "real");
+            var digits = new DigitReader(); DigitFont.SeedInto(digits);
+            foreach (var (file, want, clockAbove) in new[] { ("counter.png", 249, false), ("screen-abyssal-196.png", 196, true), ("screen-abyssal-247.png", 247, true) })
+            {
+                string f = Path.Combine(dir, file);
+                if (!File.Exists(f)) { Console.WriteLine("  " + file + ": missing (skipped)"); continue; }
+                RgbImage img = Png.Load(f);
+                var c = WidgetFinder.FindCounters(img);
+                Ok(c.Count > 0, file + ": counter found");
+                if (c.Count == 0) continue;
+                Eq(4, c[0].Rows.Count, file + ": number, task, points, streak");
+                if (clockAbove) Ok(c[0].Rows[0].Y > c[0].Rows[1].Y - 25, file + ": the clock above is not the number row");
+                Eq(want, digits.Read(img, c[0].Rows[0].Inflate(2, 2)), file + ": number by digit shapes");
+                Ok(WidgetFinder.FindMinimisedCounters(img).Count == 0, file + ": expanded values aren't a minimised counter");
+            }
+            string mini = Path.Combine(dir, "counter-minimised.png");
+            if (File.Exists(mini))
+            {
+                RgbImage img = Png.Load(mini);
+                Eq(177, digits.Read(img, WidgetFinder.FindMinimisedCounters(img)[0].Text.Inflate(2, 2)), "minimised 177 by digit shapes");
+            }
+            // The digit shapes never give a confident wrong number (each screenshot read with the others' shapes).
+            foreach (var (file, want) in new[] { ("counter.png", 249), ("screen-abyssal-247.png", 247) })
+            {
+                string f = Path.Combine(dir, file);
+                if (!File.Exists(f)) continue;
+                RgbImage img = Png.Load(f);
+                var c = WidgetFinder.FindCounters(img)[0];
+                var other = new DigitReader();
+                foreach (var (of, ow) in new[] { ("counter.png", "249"), ("screen-abyssal-196.png", "196"), ("screen-abyssal-247.png", "247") })
+                {
+                    if (of == file) continue;
+                    RgbImage oi = Png.Load(Path.Combine(dir, of));
+                    other.Learn(oi, WidgetFinder.FindCounters(oi)[0].Rows[0].Inflate(2, 2), ow);
+                }
+                RgbImage mi = Png.Load(mini);
+                other.Learn(mi, WidgetFinder.FindMinimisedCounters(mi)[0].Text.Inflate(2, 2), "177");
+                int got = other.Read(img, c.Rows[0].Inflate(2, 2));
+                Ok(got == want || got == -1, file + ": unseen screenshot read right or not at all (got " + got + ")");
+            }
+
+            // 247 misread as 99 (and a jump to 260) right after a kill: held back; 247 lands.
+            var fl = new CounterFilter { Resolve = x => d.FindMonster(x)?.Name ?? "" };
+            var tr = NewTracker(d);
+            Func<int, CounterRead> rd = n => new CounterRead { Left = n, Task = "Abyssal Demons", Points = 6301, Streak = 293 };
+            void Feed(CounterRead x) { var ok = fl.Offer(x, tr.State); if (ok != null) tr.ApplyCounter(ok); }
+            Feed(rd(249)); Feed(rd(249));
+            Eq(249, tr.State.Left, "start 249"); Eq(249, tr.State.Assigned, "assigned 249");
+            Feed(rd(248)); Feed(rd(248));
+            Eq(248, tr.State.Left, "kill: 248");
+            for (int k = 0; k < 5; k++) Feed(rd(99));
+            Eq(248, tr.State.Left, "99 (a drop of 149) held back");
+            for (int k = 0; k < 5; k++) Feed(rd(260));
+            Eq(248, tr.State.Left, "260 (a jump up) held back"); Eq(249, tr.State.Assigned, "assigned not inflated to 260");
+            Feed(rd(247)); Feed(rd(247));
+            Eq(247, tr.State.Left, "247 adopted"); Eq("2 killed", PanelView.Build(tr, "").KilledText, "2 killed");
+            Feed(rd(246)); Feed(rd(99)); Feed(rd(246));
+            Eq(247, tr.State.Left, "frames must agree in a row"); Feed(rd(246));
+            Eq(246, tr.State.Left, "two in a row: adopted");
+            // A wrong panel count is still corrected by the counter if it keeps saying so.
+            for (int k = 0; k < 8; k++) Feed(rd(300));
+            Eq(300, tr.State.Left, "a steady counter value wins in the end");
+            // A new task (different name) is adopted after two frames whatever the number.
+            Feed(new CounterRead { Left = 120, Task = "Soul devourers", Points = 6315, Streak = 294 });
+            Feed(new CounterRead { Left = 120, Task = "Soul devourers", Points = 6315, Streak = 294 });
+            Eq("Soul devourers", tr.State.Monster, "new task"); Eq(120, tr.State.Left, "new task count");
+        }
+
+        /// <summary>Prints DigitFont's shape table, learned from the real screenshots in tests/fixtures/real
+        /// (big number rows for 1 2 4 6 7 9; points/streak values for the rest).
+        /// Run: dotnet run -c Release --project tests/UnitTests -- --emit-digit-font</summary>
+        static void EmitDigitFont()
+        {
+            string dir = Path.Combine(AppContext.BaseDirectory, "fixtures", "real");
+            var big = new DigitReader(); var small = new DigitReader();
+            foreach (var (file, nums) in new[] { ("counter.png", new[] { "249", "6257", "291" }), ("screen-abyssal-196.png", new[] { "196", "6301", "293" }), ("screen-abyssal-247.png", new[] { "247", "6301", "293" }) })
+            {
+                RgbImage img = Png.Load(Path.Combine(dir, file));
+                var c = WidgetFinder.FindCounters(img)[0];
+                big.Learn(img, c.Rows[0].Inflate(2, 2), nums[0]);
+                small.Learn(img, c.Rows[2].Inflate(2, 2), nums[1]);
+                small.Learn(img, c.Rows[3].Inflate(2, 2), nums[2]);
+            }
+            RgbImage m = Png.Load(Path.Combine(dir, "counter-minimised.png"));
+            big.Learn(m, WidgetFinder.FindMinimisedCounters(m)[0].Text.Inflate(2, 2), "177");
+            foreach (var kv in small.Export()) big.Seed(kv.Key, kv.Value);
+            foreach (var kv in big.Export().OrderBy(k => k.Key))
+                Console.WriteLine("            { '" + kv.Key + "', \"" + string.Concat(kv.Value.Select(v => (char)('a' + (int)Math.Round(v * 20)))) + "\" },");
         }
     }
 }

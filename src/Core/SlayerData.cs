@@ -235,37 +235,122 @@ namespace KavrosSlayerHelper.Core
             return null;
         }
 
-        /// <summary>Finds the slayer category for a monster name read from chat ("abyssal demons",
-        /// "Abyssal demon", OCR slips such as "abyssai demons"). Null when nothing is close.</summary>
+        /// <summary>Finds the slayer category for a monster name read from the screen ("abyssal demons",
+        /// "Abyssal demon", OCR slips such as "abyssai demons", "Abyssal Oermons", a cut-off "Abyssal Oerm").
+        /// Exact and singular/plural matches win outright; otherwise an OCR-weighted edit distance (O/D, 0/O,
+        /// l/I/1, rn/m, cl/d, vv/w ... cost less than other slips) must be within a length-based threshold and
+        /// clearly better than the next category. Null when nothing is close enough: callers must not invent a
+        /// name from an unmatched read.</summary>
         public MonsterInfo FindMonster(string text)
         {
+            double score;
+            return FindMonster(text, out score);
+        }
+
+        public MonsterInfo FindMonster(string text, out double bestScore)
+        {
+            bestScore = double.MaxValue;
             if (string.IsNullOrWhiteSpace(text)) return null;
             string n = Norm(text);
             if (n.StartsWith("the ")) n = n.Substring(4);
+            if (n.Length == 0) return null;
             string ns = Singular(n);
+            string on = OcrFold(ns);
             MonsterInfo best = null;
-            int bestScore = int.MaxValue;
+            string bestName = null;
+            double secondScore = double.MaxValue;
             foreach (MonsterInfo m in Monsters.Values)
             {
+                double mine = double.MaxValue;
+                string mineName = null;
                 foreach (string cand in Names(m))
                 {
                     string c = Norm(cand);
                     if (c.Length == 0) continue;
-                    int score;
-                    if (c == n) score = 0;
-                    else if (Singular(c) == ns) score = 1;
-                    else
-                    {
-                        int dist = Levenshtein(Singular(c), ns);
-                        int allowed = Math.Max(1, ns.Length / 7);
-                        if (dist > allowed) continue;
-                        score = 10 + dist;
-                    }
-                    // Prefer the category's own name over an eligible monster of a broader category.
-                    if (cand != m.Name) score += 2;
-                    if (score < bestScore) { bestScore = score; best = m; }
+                    double sc;
+                    if (c == n) sc = 0;
+                    else if (Singular(c) == ns) sc = 0.5;
+                    else if (OcrFold(Singular(c)) == on) sc = 0.8;          // only OCR look-alikes differ
+                    else sc = 2 + OcrDistance(ns, Singular(c), true);
+                    if (cand != m.Name) sc += 0.25;   // prefer the category's own name over a broader category's monster
+                    if (sc < mine) { mine = sc; mineName = Singular(c); }
                 }
+                if (mineName == null) continue;
+                if (mine < bestScore)
+                {
+                    // The runner-up only counts when it matched a different name (not the same monster listed
+                    // again under a broader category).
+                    if (bestName != null && bestName != mineName) secondScore = bestScore;
+                    bestScore = mine; best = m; bestName = mineName;
+                }
+                else if (mineName != bestName && mine < secondScore) secondScore = mine;
             }
+            if (best == null) return null;
+            if (bestScore < 2) return best;                                  // exact, plural or look-alike only
+            double dist = bestScore - 2;
+            double allowed = Math.Max(1.0, ns.Length * 0.18);
+            if (dist > allowed) return null;
+            if (secondScore - bestScore < 0.75) return null;                   // ambiguous: don't guess
+            return best;
+        }
+
+        /// <summary>Folds characters Windows OCR mixes up on the RS3 fonts into one form.</summary>
+        public static string OcrFold(string s)
+        {
+            var sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                char next = i + 1 < s.Length ? s[i + 1] : '\0';
+                if (c == 'r' && next == 'n') { sb.Append('m'); i++; continue; }
+                if (c == 'c' && next == 'l') { sb.Append('d'); i++; continue; }
+                if (c == 'v' && next == 'v') { sb.Append('w'); i++; continue; }
+                switch (c)
+                {
+                    case 'o': case '0': case 'q': c = 'd'; break;          // O/D/0/Q: round capitals
+                    case 'l': case 'i': case '1': case '|': case 'j': c = 'l'; break;
+                    case '5': c = 's'; break;
+                    case '8': c = 'b'; break;
+                    case '6': c = 'g'; break;
+                }
+                sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        static bool LookAlike(char a, char b)
+        {
+            if (a == b) return true;
+            string[] groups = { "od0q", "li1|j", "s5", "b8h", "g6q", "ec", "un", "vy", "nh", "mn", "ft", "rn" };
+            foreach (string g in groups) if (g.IndexOf(a) >= 0 && g.IndexOf(b) >= 0) return true;
+            return false;
+        }
+
+        /// <summary>Edit distance from an OCR read to a known name: look-alike substitutions cost 0.35,
+        /// rn/m, cl/d, vv/w 0.35, anything else 1. With <paramref name="allowCut"/>, a read that stops early
+        /// (the rest of the name cut off) costs 0.25 per missing character instead of 1.</summary>
+        public static double OcrDistance(string read, string known, bool allowCut)
+        {
+            int la = read.Length, lb = known.Length;
+            var d = new double[la + 1, lb + 1];
+            for (int i = 0; i <= la; i++) d[i, 0] = i;
+            for (int j = 0; j <= lb; j++) d[0, j] = j;
+            for (int i = 1; i <= la; i++)
+                for (int j = 1; j <= lb; j++)
+                {
+                    char a = read[i - 1], b = known[j - 1];
+                    double sub = a == b ? 0 : LookAlike(a, b) ? 0.35 : 1;
+                    double v = Math.Min(d[i - 1, j - 1] + sub, Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1));
+                    if (i >= 2 && b == 'm' && read[i - 2] == 'r' && a == 'n') v = Math.Min(v, d[i - 2, j - 1] + 0.35);
+                    if (j >= 2 && a == 'm' && known[j - 2] == 'r' && b == 'n') v = Math.Min(v, d[i - 1, j - 2] + 0.35);
+                    if (i >= 2 && b == 'd' && read[i - 2] == 'c' && a == 'l') v = Math.Min(v, d[i - 2, j - 1] + 0.35);
+                    if (i >= 2 && b == 'w' && read[i - 2] == 'v' && a == 'v') v = Math.Min(v, d[i - 2, j - 1] + 0.35);
+                    d[i, j] = v;
+                }
+            double best = d[la, lb];
+            if (allowCut && la >= 6)
+                for (int j = Math.Max(1, la - 2); j < lb; j++)
+                    best = Math.Min(best, d[la, j] + (lb - j) * 0.25);
             return best;
         }
 

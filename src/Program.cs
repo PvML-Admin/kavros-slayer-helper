@@ -10,15 +10,15 @@ using KavrosSlayerHelper.Core;
 [assembly: System.Reflection.AssemblyProduct("Kavros Slayer Helper")]
 [assembly: System.Reflection.AssemblyDescription("Kavros Slayer Helper by Meleeman112: reads your slayer task from the slayer counter and the master's dialogue")]
 [assembly: System.Reflection.AssemblyCompany("Meleeman112")]
-[assembly: System.Reflection.AssemblyVersion("0.1.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.2.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("0.1.2")]
+[assembly: System.Reflection.AssemblyVersion("0.1.3.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.3.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("0.1.3")]
 
 namespace KavrosSlayerHelper
 {
     internal static class Program
     {
-        public const string Version = "0.1.2";
+        public const string Version = "0.1.3";
 
         [STAThread]
         static int Main(string[] args)

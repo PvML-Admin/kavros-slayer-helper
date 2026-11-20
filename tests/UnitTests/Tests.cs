@@ -19,8 +19,9 @@ namespace KavrosSlayerHelper.Tests
         static string BaseJson;
         static SlayerData Data(string over = null) { return SlayerData.Load(BaseJson, over); }
 
-        static int Main()
+        static int Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "--emit-digit-font") { EmitDigitFont(); return 0; }
             BaseJson = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "slayer.json"));
             Run("data", DataTests);
             Run("merge", MergeTests);
@@ -39,6 +40,7 @@ namespace KavrosSlayerHelper.Tests
             Run("digits", DigitTests);
             Run("real-fixtures", RealFixtureTests);
             Run("minimised", MinimisedTests);
+            Run("regressions-0.1.3", RegressionTests);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }

@@ -14,7 +14,7 @@ namespace KavrosSlayerHelper
     internal sealed class WidgetRead
     {
         public CounterRead Counter;           // a reading of the slayer counter, or null
-        public bool CounterDirect;            // read by digit templates (already trusted)
+        public string CounterBy = "";         // how the number was read: digits, digits+ocr, ocr x2, ocr
         public List<TextLine> Dialogue;       // OCR lines of a dialogue box that just appeared or changed
         public bool DialogueGone;             // no dialogue box on screen any more
         public bool Forced;
@@ -57,7 +57,9 @@ namespace KavrosSlayerHelper
         Box numberRow;                                // the big number inside the counter region (region px)
         bool lockedMinimised;                         // the locked counter is the minimised form (just the number)
         volatile DebugFrame lastFrame;                // the last full capture and what was found in it
-        readonly DigitReader digits = new DigitReader();
+        readonly DigitReader digits = NewDigits();
+
+        static DigitReader NewDigits() { var d = new DigitReader(); DigitFont.SeedInto(d); return d; }
 
         public int IntervalMs = 1000;
         public volatile string Status = "Looking for the slayer counter\u2026";
@@ -178,30 +180,32 @@ namespace KavrosSlayerHelper
         {
             Box all = new Box(0, 0, img.W, img.H);
             long fp = WidgetFinder.Fingerprint(img, all);
-            if (fp == counterFp && !forced && !needConfirm()) return;    // nothing changed: no OCR at all
-            // A kill changes only the big number: read it by template when the rest is as it was.
-            if (!forced && !numberRow.IsEmpty && digits.Known > 0 && lastLeft > 0)
+            // Unchanged pixels: nothing to do, unless the host is confirming a change (it wants the same
+            // reading on consecutive frames before adopting it).
+            if (fp == counterFp && !forced && !needConfirm()) return;
+            Box row = NumberRow(img);
+            int byDigits = row.IsEmpty ? -1 : digits.Read(img, row);
+            // Only the number changed (a kill) and the digit shapes are sure of it: no OCR at all.
+            if (!forced && byDigits >= 0 && lastLeft >= 0 && !numberRow.IsEmpty && row.Equals(numberRow)
+                && WidgetFinder.Fingerprint(img, Rest(img, row)) == counterRestFp)
             {
-                Box rest = new Box(0, numberRow.Bottom, img.W, Math.Max(1, img.H - numberRow.Bottom));
-                long restFp = WidgetFinder.Fingerprint(img, rest);
-                int n = digits.Read(img, numberRow);
-                if (restFp == counterRestFp && n >= 0 && lastLeft - n >= 1 && lastLeft - n <= 5)
-                {
-                    counterFp = fp;
-                    lastLeft = n;
-                    read.Counter = new CounterRead { Left = n, Task = lastTask, Points = lastPoints, Streak = lastStreak, Minimised = lastMinimised };
-                    read.CounterDirect = true;
-                    return;
-                }
+                counterFp = fp;
+                counterMisses = 0;
+                lastLeft = byDigits;
+                read.Counter = new CounterRead { Left = byDigits, Task = lastTask, Points = lastPoints, Streak = lastStreak, Minimised = lastMinimised };
+                read.CounterBy = "digits";
+                return;
             }
             CounterRead r = CounterParser.Parse(OcrLines(img, all, 3f, false));
+            string by = FixNumber(img, row, byDigits, ref r);
             if (r.Valid)
             {
                 counterFp = fp;
                 counterMisses = 0;
                 Status = "";
-                Remember(r, img);
+                Remember(r, img, row);
                 read.Counter = r;
+                read.CounterBy = by;
             }
             else if (++counterMisses >= 6 && fixedCounter == null)
             {
@@ -214,22 +218,87 @@ namespace KavrosSlayerHelper
             }
         }
 
+        /// <summary>Settles the kills-left number of an OCR reading: the digit shapes (from the real counter
+        /// font) win when they are sure; otherwise the number is OCR'd again on its own and must agree with the
+        /// whole-box read and the glyph count (then its shapes are learned); otherwise the reading gets no
+        /// number. Returns how it was read.</summary>
+        string FixNumber(RgbImage img, Box row, int byDigits, ref CounterRead r)
+        {
+            if (row.IsEmpty) return "ocr";
+            if (byDigits >= 0)
+            {
+                if (r.Left != byDigits && r.Left >= 0) Log.Write("counter: OCR read " + r.Left + ", digits read " + byDigits + " (using digits)");
+                if (!r.Valid && lastLeft >= 0) r = new CounterRead { Task = lastTask, Points = lastPoints, Streak = lastStreak, Minimised = lastMinimised };
+                r.Left = byDigits;
+                return "digits+ocr";
+            }
+            // A digit the shapes don't know yet (8 isn't in any screenshot).
+            int lone = OcrNumber(img, row);
+            int glyphs = DigitReader.GlyphCount(img, row);
+            if (lone >= 0 && lone == r.Left && lone.ToString().Length == glyphs)
+            {
+                digits.Learn(img, row, lone.ToString());
+                return "ocr x2";
+            }
+            if (r.Left >= 0) Log.Write("counter: number unsure (box OCR " + r.Left + ", number OCR " + lone + ", " + glyphs + " glyphs): skipped");
+            r.Left = -1;
+            return "unsure";
+        }
+
+        /// <summary>The big number's row inside a counter crop, found from the layout (expanded: the top row
+        /// of the stack; minimised: the lone number), padded for the digit reader. Empty when unclear.</summary>
+        static Box NumberRow(RgbImage img)
+        {
+            List<CounterCandidate> ex = WidgetFinder.FindCounters(img);
+            if (ex.Count > 0 && ex[0].Rows.Count >= 3 && ex[0].Score >= 4) return ex[0].Rows[0].Inflate(2, 2).Intersect(new Box(0, 0, img.W, img.H));
+            List<CounterCandidate> mi = WidgetFinder.FindMinimisedCounters(img);
+            if (mi.Count > 0) return mi[0].Text.Inflate(2, 2).Intersect(new Box(0, 0, img.W, img.H));
+            return Box.Empty;
+        }
+
+        static Box Rest(RgbImage img, Box row)
+        {
+            return new Box(0, row.Bottom, img.W, Math.Max(1, img.H - row.Bottom));
+        }
+
+        /// <summary>OCR of the number row alone: yellow ink drawn black on white, scaled up and padded
+        /// (Windows OCR reads an isolated, high-contrast number far more reliably). -1 if not a number.</summary>
+        int OcrNumber(RgbImage img, Box row)
+        {
+            row = row.Intersect(new Box(0, 0, img.W, img.H));
+            if (row.IsEmpty || stop) return -1;
+            const int k = 4, pad = 24;
+            var clean = new RgbImage(row.W * k + pad * 2, row.H * k + pad * 2);
+            for (int i = 0; i < clean.Px.Length; i++) clean.Px[i] = 255;
+            for (int y = 0; y < row.H; y++)
+                for (int x = 0; x < row.W; x++)
+                {
+                    int i = ((row.Y + y) * img.W + row.X + x) * 3;
+                    if (!Colours.Yellow(img.Px[i], img.Px[i + 1], img.Px[i + 2])) continue;
+                    for (int dy = 0; dy < k; dy++)
+                        for (int dx = 0; dx < k; dx++)
+                        {
+                            int o = ((pad + y * k + dy) * clean.W + pad + x * k + dx) * 3;
+                            clean.Px[o] = clean.Px[o + 1] = clean.Px[o + 2] = 0;
+                        }
+                }
+            using (Bitmap b = ToBitmap(clean, new Box(0, 0, clean.W, clean.H)))
+            {
+                string text = string.Join(" ", ocr.Read(b).Select(kv => kv.Key));
+                string t = ChatParser.Clean(text).Replace(",", "").Replace(".", "").Replace(" ", "");
+                t = t.Replace('O', '0').Replace('o', '0').Replace('l', '1').Replace('I', '1').Replace('|', '1').Replace('S', '5');
+                int n;
+                return t.Length > 0 && t.Length <= 5 && t.All(char.IsDigit) && int.TryParse(t, out n) ? n : -1;
+            }
+        }
+
         string lastTask = ""; int lastPoints = -1, lastStreak = -1; bool lastMinimised;
 
-        void Remember(CounterRead r, RgbImage img)
+        void Remember(CounterRead r, RgbImage img, Box row)
         {
             lastLeft = r.Left; lastTask = r.Task; lastPoints = r.Points; lastStreak = r.Streak; lastMinimised = r.Minimised;
-            numberRow = Box.Empty;
-            if (r.NumberLine != null)
-            {
-                var row = new Box((int)r.NumberLine.X - 3, (int)r.NumberLine.Y - 2, (int)r.NumberLine.W + 6, (int)r.NumberLine.H + 4).Intersect(new Box(0, 0, img.W, img.H));
-                // Learning succeeds only when the glyph count matches what OCR read.
-                if (!row.IsEmpty && digits.Learn(img, row, r.Left.ToString()))
-                {
-                    numberRow = row;
-                    counterRestFp = WidgetFinder.Fingerprint(img, new Box(0, row.Bottom, img.W, Math.Max(1, img.H - row.Bottom)));
-                }
-            }
+            numberRow = row;
+            counterRestFp = row.IsEmpty ? 0 : WidgetFinder.Fingerprint(img, Rest(img, row));
         }
 
         int candidateTurn;
@@ -297,7 +366,10 @@ namespace KavrosSlayerHelper
             counterFp = WidgetFinder.Fingerprint(img, new Box(0, 0, img.W, img.H));
             counterMisses = 0;
             Status = "";
-            Remember(r, img);
+            Box row = NumberRow(img);
+            read.CounterBy = FixNumber(img, row, row.IsEmpty ? -1 : digits.Read(img, row), ref r);
+            if (!r.Valid) { Log.Write("counter: found by " + how + " at " + c + " but the number is unsure"); counterFp = 0; return; }
+            Remember(r, img, row);
             read.Counter = r;
             Log.Write("counter: found by " + how + " at " + c + " (" + r + ")");
         }
