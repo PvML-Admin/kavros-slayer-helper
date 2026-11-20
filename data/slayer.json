@@ -11137,14 +11137,15 @@
  },
  "chat": {
   "assign": [
-   "new task is to kill (?<count>\\d[\\d,.]*) (?<monster>[^.;!?]+)",
+   "(?:new )?task is to kill (?<count>\\d[\\d,.]*) (?!more )(?<monster>[^.;!?]+)",
    "start you off hunting (?<monster>[^.;!?]+?)[.;,]? ?you'?ll need to kill (?<count>\\d[\\d,.]*)",
-   "you need to kill (?<count>\\d[\\d,.]*) (?<monster>[^.;!?]+)",
+   "you need to kill (?<count>\\d[\\d,.]*) (?!more )(?<monster>[^.;!?]+)",
    "go and kill (?<count>\\d[\\d,.]*) (?<monster>[^.;!?]+)",
-   "new task is to kill (?<monster>[a-z][^.;!?\\d]+)"
+   "(?:new )?task is to kill (?<monster>[a-z][^.;!?\\d]+)"
   ],
   "progress": [
    "assigned to kill (?<monster>[^;:]+?)\\s*[;:,.]\\s*only (?<left>\\d[\\d,.]*) more to go",
+   "kill (?<left>\\d[\\d,.]*) more (?<monster>[^.;!?]+)",
    "you still need to kill (?<left>\\d[\\d,.]*) (?:monsters? )?to complete your (?:current )?slayer",
    "(?<left>\\d[\\d,.]*) (?:more )?(?:kills? )?(?:left|remaining) (?:on|for|in) your (?:slayer )?task",
    "slayer task[^.]*?(?<left>\\d[\\d,.]*) (?:kills? )?(?:left|remaining)",

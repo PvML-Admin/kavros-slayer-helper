@@ -15,8 +15,9 @@ namespace KavrosSlayerHelper
         public bool Verbose, Demo, NoOcr;
     }
 
-    /// <summary>Hosts the panel: follows the game window, reads chat, applies what it reads, saves the state.
-    /// There is no tray icon; the panel itself is the app (Companion's toggle starts and stops it).</summary>
+    /// <summary>Hosts the panel: follows the game window, reads the slayer counter and the master's dialogue,
+    /// applies what it reads, saves the state. There is no tray icon; the panel itself is the app
+    /// (Companion's toggle starts and stops it).</summary>
     internal sealed class App : ApplicationContext
     {
         readonly Settings settings;
@@ -25,18 +26,23 @@ namespace KavrosSlayerHelper
         SlayerTracker tracker;
         readonly SlayerPanel panel;
         readonly ClientTracker client;
-        readonly ChatReader reader;
+        readonly WidgetReader reader;
+        readonly CounterFilter counterFilter = new CounterFilter();
         readonly Timer saveTimer = new Timer { Interval = 800 };
         readonly Timer statusTimer = new Timer { Interval = 1500 };
         readonly bool demo;
         FileSystemWatcher watcher;
         Timer reloadTimer;
+        volatile bool confirmWanted;
+        bool exiting;
 
-        List<string> prevLines;
-        readonly Dictionary<string, DateTime> seen = new Dictionary<string, DateTime>();
-        bool startupGrace = true;
-        bool everRead;
+        string lastDialogue;            // the dialogue text already applied (until the box closes)
         string lastStatus = "";
+        readonly Dictionary<uint, bool> helperPids = new Dictionary<uint, bool>();
+        DateTime helperPidsAt = DateTime.MinValue;
+
+        /// <summary>Kavros helper apps whose windows count as "the game" for staying visible.</summary>
+        static readonly string[] HelperProcesses = { "KavrosCompanion", "KavrosClueHelper", "KavrosAfkWarden", "KavrosSlayerHelper", "KavrosOverlay" };
 
         public App(StartupOptions opts)
         {
@@ -51,13 +57,19 @@ namespace KavrosSlayerHelper
             panel.Clicked += OnPanelClick;
             panel.Wheel += d => { if (tracker.Adjust(d)) Changed(); };
             panel.EditFinished += OnEditFinished;
+            panel.DragMoved += OnDragMoved;
+            panel.DragEnded += () => settings.Save();
+            // Companion's toggle (or anything else) closing the window: vanish at once, then exit.
+            panel.CloseRequested += () => ExitNow("close requested");
+            panel.FormClosing += (s, e) => { if (!exiting) { e.Cancel = true; ExitNow("window closed"); } };
             if (settings.HideFromCapture) panel.HandleCreated += (s, e) => ExcludeFromCapture(panel.Handle);
 
-            client = new ClientTracker(() => settings, IsOwnWindow) { DebugTitle = opts.AttachTitle };
+            client = new ClientTracker(() => settings, IsOwnWindow) { DebugTitle = opts.AttachTitle, IsLinkedAppPid = IsHelperPid };
             client.Changed += Relayout;
             client.ForegroundChanged += OnForegroundChanged;
+            client.Polled += KeepAboveGame;
 
-            reader = new ChatReader(line => parser.Parse(line) != null, OnChatReadWorker, settings.ChatRegion) { IntervalMs = settings.ScanMs };
+            reader = new WidgetReader(OnReadWorker, () => confirmWanted, settings.CounterRegion) { IntervalMs = settings.ScanMs };
             panel.Move += (s, e) => reader.SetExclude(panel.Visible ? panel.Bounds : Rectangle.Empty);
             panel.Resize += (s, e) => reader.SetExclude(panel.Visible ? panel.Bounds : Rectangle.Empty);
             panel.VisibleChanged += (s, e) => reader.SetExclude(panel.Visible ? panel.Bounds : Rectangle.Empty);
@@ -72,7 +84,36 @@ namespace KavrosSlayerHelper
             WatchOverride();
             Log.Write("started " + Program.Version + (data.OverrideLoaded ? " (with " + Settings.OverridePath + ")" : ""));
             if (data.OverrideError != null) Log.Write("override: " + data.OverrideError);
-            foreach (string e in parser.Errors) Log.Write("chat pattern ignored: " + e);
+            foreach (string e in parser.Errors) Log.Write("dialogue pattern ignored: " + e);
+        }
+
+        /// <summary>Hides the panel first (so it disappears the moment Companion switches it off), then stops.</summary>
+        void ExitNow(string why)
+        {
+            if (exiting) return;
+            exiting = true;
+            Log.Write("exit: " + why);
+            try { panel.HidePassive(); } catch (Exception) { }
+            reader.Dispose();              // the worker is a background thread: it never holds the exit up
+            ExitThread();
+        }
+
+        bool IsHelperPid(uint pid)
+        {
+            if (pid == 0) return false;
+            DateTime now = DateTime.UtcNow;
+            if ((now - helperPidsAt).TotalSeconds > 60) { helperPids.Clear(); helperPidsAt = now; }
+            bool yes;
+            if (helperPids.TryGetValue(pid, out yes)) return yes;
+            yes = false;
+            try
+            {
+                using (var p = System.Diagnostics.Process.GetProcessById((int)pid))
+                    yes = HelperProcesses.Any(n => string.Equals(p.ProcessName, n, StringComparison.OrdinalIgnoreCase));
+            }
+            catch (Exception) { }
+            helperPids[pid] = yes;
+            return yes;
         }
 
         // ---- data --------------------------------------------------------------------------------
@@ -113,51 +154,48 @@ namespace KavrosSlayerHelper
         {
             return new SlayerState
             {
-                Monster = "Abyssal demons", Master = "Kuradal", Assigned = 187, Left = 142, Streak = 47, Points = 1240,
-                LastChat = "only 142 more to go", LastSource = "chat", Updated = DateTime.Now,
+                Monster = "Dragons", Master = "Laniakea", Assigned = 135, Left = 118, Streak = 291, Points = 6257,
+                LastChat = "", LastSource = "counter", Updated = DateTime.Now,
             };
         }
 
-        // ---- chat ----------------------------------------------------------------------------------
-        void OnChatReadWorker(ChatRead r)
+        // ---- counter and dialogue -----------------------------------------------------------------
+        void OnReadWorker(WidgetRead r)
         {
-            try { panel.BeginInvoke((Action)(() => OnChatRead(r))); } catch (Exception) { }
+            if (exiting) return;
+            try { panel.BeginInvoke((Action)(() => OnRead(r))); } catch (Exception) { }
         }
 
-        void OnChatRead(ChatRead r)
+        void OnRead(WidgetRead r)
         {
-            DateTime now = DateTime.Now;
-            foreach (string k in seen.Where(kv => (now - kv.Value).TotalMinutes > 15).Select(kv => kv.Key).ToList()) seen.Remove(k);
-
-            List<string> fresh;
-            if (r.Forced) fresh = r.Lines;                                  // Rescan: everything on screen
-            else if (!everRead && tracker.State.HasTask) fresh = new List<string>();   // first look: baseline only
-            else if (r.RegionChanged || prevLines == null)
-                fresh = r.Lines.Where(l => !seen.ContainsKey(SlayerData.Norm(l))).ToList();
-            else fresh = LineDiff.NewLines(prevLines, r.Lines);
-            everRead = true;
-            prevLines = r.Lines;
-
+            if (exiting) return;
             bool changed = false;
-            for (int i = 0; i < r.Lines.Count; i++)
+            if (r.DialogueGone) lastDialogue = null;
+            if (r.Dialogue != null)
             {
-                string line = r.Lines[i];
-                seen[SlayerData.Norm(line)] = now;
-            }
-            for (int i = 0; i < fresh.Count; i++)
-            {
-                string line = fresh[i];
-                ChatEvent e = parser.Parse(line);
-                if (e == null)
+                DialogueRead d = DialogueParser.Parse(r.Dialogue, parser, data);
+                if (d.Event != null && (d.Text != lastDialogue || r.Forced))
                 {
-                    // A long message wraps onto two lines: try it joined with the line above.
-                    int at = r.Lines.IndexOf(line);
-                    if (at > 0) e = parser.Parse(r.Lines[at - 1] + " " + line);
+                    Log.Write("dialogue: " + d.Event + "  <- \"" + d.Text + "\"");
+                    if (tracker.Apply(d.Event, "popup"))
+                    {
+                        changed = true;
+                        // The counter (if open) is still the truth for the count: read it again.
+                        counterFilter.Reset();
+                    }
                 }
-                if (e == null) continue;
-                Log.Write("chat: " + e + "  <- \"" + e.Line + "\"");
-                if (tracker.Apply(e)) changed = true;
+                if (d.Text.Length > 0) lastDialogue = d.Text;
             }
+            if (r.Counter != null)
+            {
+                CounterRead ok = r.CounterDirect ? counterFilter.Accept(r.Counter) : counterFilter.Offer(r.Counter, tracker.State.HasTask);
+                if (ok != null)
+                {
+                    if (Log.Verbose) Log.Write("counter: " + ok);
+                    if (tracker.ApplyCounter(ok)) changed = true;
+                }
+            }
+            confirmWanted = counterFilter.NeedsConfirm;
             if (changed) Changed();
         }
 
@@ -177,7 +215,7 @@ namespace KavrosSlayerHelper
                 case SlayerPanel.Hit.Minimise:
                     settings.Minimised = !settings.Minimised; panel.Minimised = settings.Minimised; settings.Save(); Relayout(); break;
                 case SlayerPanel.Hit.Rescan:
-                    reader.Rescan(); lastStatus = "Reading chat\u2026"; Refresh(); break;
+                    reader.Rescan(); counterFilter.Reset(); lastDialogue = null; lastStatus = "Looking for the slayer counter\u2026"; Refresh(); break;
                 case SlayerPanel.Hit.Clear:
                     if (tracker.Clear()) Changed(); break;
                 case SlayerPanel.Hit.Minus: if (tracker.Adjust(-1)) Changed(); break;
@@ -218,14 +256,22 @@ namespace KavrosSlayerHelper
         {
             IntPtr fg = Native.GetForegroundWindow();
             ClientState st = client.State;
-            if (fg != IntPtr.Zero && !st.Active) startupGrace = false;
             // WS_EX_NOACTIVATE belt and braces: if the panel ends up in front without an edit, hand focus back.
-            if (IsOwnWindow(fg) && !panel.Editing && st.Visible) Native.SetForegroundWindow(st.Handle);
+            if (IsOwnWindow(fg) && !panel.Editing && !panel.Dragging && st.Visible) Native.SetForegroundWindow(st.Handle);
             Relayout();
+        }
+
+        /// <summary>Every poll: stay directly above the game in the z-order (other apps in front of the game
+        /// stay in front of the panel; the panel never goes topmost over them).</summary>
+        void KeepAboveGame()
+        {
+            ClientState st = client.State;
+            if (st.Attached && st.Visible && panel.Visible) panel.KeepJustAbove(st.Handle);
         }
 
         void Relayout()
         {
+            if (exiting) return;
             ClientState st = client.State;
             if (st.Visible) reader.SetArea(GameArea(st), st.Active);
             else reader.SetArea(Rectangle.Empty, false);
@@ -235,21 +281,71 @@ namespace KavrosSlayerHelper
                 // No game: stay on screen (not on top of other apps) so the helper is never just "somewhere".
                 float s0 = Native.DpiFor(IntPtr.Zero) / 96f;
                 panel.SetScale(s0);
+                Size sz0 = panel.MeasureAt(s0);
                 Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-                panel.PlaceAt(new Point(wa.Left + (int)Math.Round(12 * s0), wa.Top + (int)Math.Round(12 * s0)));
+                int fx = settings.FreeX != int.MinValue ? settings.FreeX : wa.Left + (int)Math.Round(12 * s0);
+                int fy = settings.FreeY != int.MinValue ? settings.FreeY : wa.Top + (int)Math.Round(12 * s0);
+                Rectangle mon = Screen.FromPoint(new Point(fx + sz0.Width / 2, fy + 10)).WorkingArea;
+                int cx, cy;
+                Placement.Clamp(fx, fy, sz0.Width, sz0.Height, ToBox(mon), out cx, out cy);
+                panel.PlaceAt(new Point(cx, cy));
                 panel.ShowPassive();
                 panel.SetTopMost(false);
                 return;
             }
-            bool show = st.Visible && (st.Active || startupGrace || panel.Editing);
-            if (!show) { panel.HidePassive(); return; }
+            // Visible whenever the game is on screen, focused or not (only minimised or closed hides it);
+            // the z-order, not hiding, keeps it from covering other apps.
+            if (!st.Visible) { if (!panel.Editing) panel.HidePassive(); return; }
             float s = st.Dpi / 96f;
             panel.SetScale(s);
+            Size sz = panel.MeasureAt(s);
             Rectangle area = GameArea(st);
-            panel.PlaceAt(new Point(area.Left + (int)Math.Round(settings.OffsetX * s), area.Top + (int)Math.Round(settings.OffsetY * s)));
+            int x = area.Left + (int)Math.Round(settings.OffsetX * s), y = area.Top + (int)Math.Round(settings.OffsetY * s);
+            int px, py;
+            Placement.Clamp(x, y, sz.Width, sz.Height, Bounds(area), out px, out py);
+            panel.PlaceAt(new Point(px, py));
+            bool wasVisible = panel.Visible;
             panel.ShowPassive();
-            panel.SetTopMost(true);
+            panel.KeepJustAbove(st.Handle);
+            if (!wasVisible) panel.Present();
         }
+
+        /// <summary>The panel dragged to <paramref name="p"/> (screen px): store it as an offset in the game
+        /// (so it follows the client), or as a free position when no game is open.</summary>
+        void OnDragMoved(Point p)
+        {
+            ClientState st = client.State;
+            if (st.Attached && st.Visible)
+            {
+                float s = st.Dpi / 96f;
+                Size sz = panel.MeasureAt(s);
+                Rectangle area = GameArea(st);
+                int cx, cy;
+                Placement.Clamp(p.X, p.Y, sz.Width, sz.Height, Bounds(area), out cx, out cy);
+                int ox, oy;
+                Placement.ToOffset(cx, cy, ToBox(area), s, out ox, out oy);
+                settings.OffsetX = ox; settings.OffsetY = oy;
+            }
+            else
+            {
+                Size sz = panel.PixelSize;
+                Rectangle mon = Screen.FromPoint(new Point(p.X + sz.Width / 2, p.Y + 10)).WorkingArea;
+                int cx, cy;
+                Placement.Clamp(p.X, p.Y, sz.Width, sz.Height, ToBox(mon), out cx, out cy);
+                settings.FreeX = cx; settings.FreeY = cy;
+            }
+            Relayout();
+        }
+
+        /// <summary>The game area, cut to the monitor's working area so the panel is never off screen.</summary>
+        static Box Bounds(Rectangle area)
+        {
+            Rectangle wa = Screen.FromRectangle(area).WorkingArea;
+            Rectangle r = Rectangle.Intersect(area, wa);
+            return ToBox(r.Width > 50 && r.Height > 50 ? r : area);
+        }
+
+        static Box ToBox(Rectangle r) { return new Box(r.X, r.Y, r.Width, r.Height); }
 
         /// <summary>The game's render area: the client area, minus the Kavros client's own 32px title bar
         /// when the window is borderless (same rule as Companion's title-bar strip).</summary>
@@ -278,6 +374,7 @@ namespace KavrosSlayerHelper
         {
             if (disposing)
             {
+                exiting = true;
                 reader.Dispose();
                 client.Dispose();
                 if (watcher != null) watcher.Dispose();

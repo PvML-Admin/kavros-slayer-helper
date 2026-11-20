@@ -1,8 +1,8 @@
 # Kavros Slayer Helper
 
 A Companion module for the Kavros client, created by **Meleeman112**. It docks a small panel over the
-top-left of `kavrosclient.exe`, reads your Slayer task from the chatbox and shows the kills left, who
-assigned it, where to go, how to fight it, and your streak and points.
+top-left of `kavrosclient.exe`, reads your Slayer task from the RS3 slayer counter and the slayer master's
+dialogue, and shows the kills left, who assigned it, where to go, how to fight it, and your streak and points.
 
 Players only install Kavros Companion. Companion lists **Slayer helper** in its hub, downloads this app
 from this repository's [Releases](https://github.com/PvML-Admin/kavros-slayer-helper/releases)
@@ -13,12 +13,17 @@ sends input to the game.
 
 ## The panel
 
-- **Full** and **compact** modes (the *Compact* / *Expand* button) and a minimise button that folds the
-  panel to its header. The mode is remembered.
-- Shown only while the Kavros client (or the panel itself) is the foreground window; it follows the client
-  when it moves or resizes. It never takes focus from the game, except while you type a count (below).
-- On screen from startup. No tray icon. One copy at a time (mutex `Local\KavrosSlayerHelper`).
-- **Rescan** re-reads everything visible in the chatbox now (and finds the chatbox again).
+- **Full** and **compact** modes (the *Compact* / *Expand* button) and a minimise button (`–`, which turns
+  into `+` to expand again) that folds the panel to its header. The mode is remembered.
+- **Drag it** by the header or any empty part of the panel. The position is remembered (as an offset inside
+  the game, so it moves with the client) and always kept inside the game area on screen.
+- Visible whenever the Kavros client is on screen, focused or not (clicking Companion, AFK Warden, Clue
+  Helper or another app doesn't hide it); it sits directly above the client in the window order, so other
+  apps you bring to the front cover it, and it is never "always on top" over them. Hidden only while the
+  client is minimised or closed. It never takes focus from the game, except while you type a count (below).
+- On screen from startup. No tray icon. One copy at a time (mutex `Local\KavrosSlayerHelper`). Switching it
+  off in Companion (WM_CLOSE) hides it immediately and exits.
+- **Rescan** looks for the slayer counter again and re-reads an open master dialogue.
   **Clear** forgets the current task (the streak and points stay).
 
 ### Setting the count by hand
@@ -30,42 +35,35 @@ Kavros may not print how many kills are left, so the count can always be set or 
 - Hover the task to show small − / + buttons, or use the mouse wheel over it (one kill per notch).
 - If the assignment message has no amount, the panel says *left · click to set* until you set it.
 
-## Reading chat
+## Reading the counter and the master's dialogue
 
-The chat reader captures the game window, finds the chatbox (the bottom-left area first, then the whole
-window, anchored on Slayer lines or on timestamped lines), cleans the pixels and runs Windows' built-in text
-recognition (`Windows.Media.Ocr`, Windows 10 or 11, English language pack). This is the approach Zenity's
-Clue Helper uses (MIT; see `THIRD_PARTY.txt`). Each read is compared with the last so a message is only
-counted once, even when it stays on screen; text inside the panel itself is ignored.
+RS3 doesn't put the task in the chatbox. The helper captures the game window and runs Windows' built-in text
+recognition (`Windows.Media.Ocr`, Windows 10 or 11, English language pack) on two widgets, the approach
+Zenity's Clue Helper uses (MIT; see `THIRD_PARTY.txt`):
 
-Recognised out of the box (RS3 wording, from the wiki's Slayer master transcripts):
+- **The slayer counter** (the dark box with the yellow kills-left number, the task name, *Slayer points* and
+  *Task streak*). It is the source of truth for the count, the points and the streak whenever it is on
+  screen, even when it shows more than was assigned. It is found anywhere in the client by colour (stacked
+  yellow text on a dark box), confirmed by OCR, then only that small region is captured each second. OCR
+  runs only when its pixels change, a changed reading must be read the same way twice before it is shown,
+  and kills are usually read by matching the big digits against templates learned from earlier reads (no
+  OCR at all). If it disappears for a few seconds the last values stay and it is looked for again.
+- **The slayer master's dialogue** (parchment box, master's name in gold at the top, portrait on the left).
+  It is found by its parchment colour every other second and read once per appearance, line wraps undone:
+  `Your new task is to kill 125 Dragons.`, `Your task is to kill …`, `… kill 40 more Dragons` (progress), the
+  wiki's other assignment wordings, and a known master's name sets the master. The patterns in the data's
+  `chat` section (overridable, below) are matched against the dialogue text.
 
-| Kind | Example |
-|---|---|
-| Assignment | `Your new task is to kill 187 abyssal demons.` (any master's lead-in), `We'll start you off hunting cows. You'll need to kill 18 of them.`, `You need to kill 22 crawling hands.`, and `Your new task is to kill abyssal demons.` with no amount |
-| Progress | `You're currently assigned to kill abyssal demons; only 142 more to go.` (enchanted gem / master), `You still need to kill 120 monsters to complete your current Slayer assignment` (combat bracelet), `You're still hunting abyssal demons; ...` |
-| Complete | `You've completed 47 tasks in a row and gain 18 points.`, `...received 270 slayer points ... total of 1,510 points`, the Raptor's special assignment, `You need something new to hunt.` |
-| Kill | none by default (see below) |
-
-A `Name:` speaker at the start of the line sets the master. Otherwise the master is only filled in when just
-one master assigns that monster in that amount. Points not shown in chat come from the master's table
-(every 10th and 50th task included).
-
-**Counting down.** The count is the assigned amount, then any progress line or configured kill line updates
-it, and you can always correct it by hand. Kavros' own kill or task messages are not known yet: add their
-wording to `chat.kill` in the override file (below) and each match counts one kill down, or sets the count if
-the pattern captures `(?<left>…)`.
+Without the counter, the count comes from the dialogue and your own corrections (below). The task name
+(`Dragons`, `DRAGON`) is matched to the wiki categories, singular or plural. The panel itself is never read.
 
 ### Limits
 
 - Needs Windows 10/11 text recognition with English installed. Without it the panel still works, by hand.
-- OCR reads what is on screen: a chat tab that is filtered, scrolled up, collapsed or covered by another
-  interface is not read. Very small or transparent chat text reads worse; a solid chat background helps.
-- Two identical kill lines in a row with nothing between them can look like one line that did not move.
-  Turning on chat timestamps in the client makes every line unique.
+- A counter covered by another interface (or the panel) isn't read until it's visible again.
+- The colour cues were tuned on screenshots; unusual interface scaling or transparency may need the
+  `counterRegion` setting to pin where the counter is.
 - The panel cannot know about kills made while it was closed, so check the count after a restart.
-- Patterns are matched against OCR text, which can drop or swap a character; the cleaner fixes common
-  digit mix-ups (O/0, l/1).
 
 ## Files
 
@@ -74,7 +72,7 @@ Everything lives in `%AppData%\KavrosSlayerHelper`:
 | File | What |
 |---|---|
 | `state.json` | the current task, count, master, streak, points |
-| `settings.json` | `compact`, `minimised`, `offsetX`/`offsetY` (panel offset in the game area, default 12), `scanMs` (chat read interval, default 1000), `chatRegion` (`[x, y, w, h]` as fractions of the game area, to fix where the chatbox is), `processName` (default `kavrosclient`), `windowTitle`, `titleBarHeight`, `hideFromCapture` |
+| `settings.json` | `compact`, `minimised`, `offsetX`/`offsetY` (panel offset in the game area, default 12, set by dragging), `freeX`/`freeY` (position when no client is open), `scanMs` (read interval, default 1000), `counterRegion` (`[x, y, w, h]` as fractions of the game area, to pin where the slayer counter is), `processName` (default `kavrosclient`), `windowTitle`, `titleBarHeight`, `hideFromCapture` |
 | `slayer.override.json` | your changes to the data (below); reloaded as soon as it is saved |
 | `slayer-helper.log` | a short log |
 
@@ -165,7 +163,7 @@ A pattern that does not compile is skipped and logged; the others keep working.
 The exe is .NET Framework 4.8 WinForms (C# 7.3) and builds with the .NET SDK on Windows or Linux:
 
 ```sh
-dotnet run -c Release --project tests/UnitTests     # unit tests (chat parsing, merge, countdown)
+dotnet run -c Release --project tests/UnitTests     # unit tests (dialogue/counter parsing, detection on tests/fixtures, merge, countdown)
 tools/release.sh                                     # out/KavrosSlayerHelper.exe + dist/KavrosSlayerHelper-win-Portable.zip
 python3 tools/build_data.py                          # regenerate data/slayer.json from the wiki
 ```

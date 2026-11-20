@@ -18,7 +18,9 @@ namespace KavrosSlayerHelper
         protected LayeredWindow()
         {
             FormBorderStyle = FormBorderStyle.None;
-            ShowInTaskbar = false;
+            // True so WinForms doesn't park us under a hidden owner window (see CreateParams); WS_EX_TOOLWINDOW
+            // and the cleared WS_EX_APPWINDOW keep the panel out of the taskbar and Alt+Tab all the same.
+            ShowInTaskbar = true;
             StartPosition = FormStartPosition.Manual;
             AutoScaleMode = AutoScaleMode.None;
             ControlBox = false;
@@ -29,6 +31,9 @@ namespace KavrosSlayerHelper
 
         protected virtual bool NoActivate { get { return true; } }
 
+        /// <summary>WM_CLOSE arrived (raised on the UI thread, before any WinForms close handling).</summary>
+        public event Action CloseRequested;
+
         protected override CreateParams CreateParams
         {
             get
@@ -38,6 +43,11 @@ namespace KavrosSlayerHelper
                 cp.ExStyle |= Native.WS_EX_LAYERED | Native.WS_EX_TOOLWINDOW;
                 if (NoActivate) cp.ExStyle |= Native.WS_EX_NOACTIVATE;
                 if (clickThrough) cp.ExStyle |= Native.WS_EX_TRANSPARENT;
+                // No owner: WinForms parks a ShowInTaskbar=false form under a hidden, untitled owner window,
+                // and Companion only sends WM_CLOSE to unowned windows, so its toggle never reached us (it
+                // waited, then killed the process). WS_EX_TOOLWINDOW already keeps us out of the taskbar.
+                cp.Parent = IntPtr.Zero;
+                cp.ExStyle &= ~0x00040000;   // WS_EX_APPWINDOW
                 return cp;
             }
         }
@@ -48,8 +58,10 @@ namespace KavrosSlayerHelper
         // so the game keeps the foreground. Linked apps like Clue Helper hide their panel when it loses it.
         protected override void WndProc(ref Message m)
         {
-            const int WM_MOUSEACTIVATE = 0x0021, MA_NOACTIVATE = 3;
+            const int WM_MOUSEACTIVATE = 0x0021, MA_NOACTIVATE = 3, WM_CLOSE = 0x0010;
             if (m.Msg == WM_MOUSEACTIVATE && NoActivate) { m.Result = (IntPtr)MA_NOACTIVATE; return; }
+            // A close request (Companion's toggle, taskkill): the host decides; nothing waits on WinForms' close path.
+            if (m.Msg == WM_CLOSE && CloseRequested != null) { CloseRequested(); m.Result = IntPtr.Zero; return; }
             base.WndProc(ref m);
         }
 
@@ -146,7 +158,28 @@ namespace KavrosSlayerHelper
         public void SetTopMost(bool topMost)
         {
             if (!IsHandleCreated) return;
+            topMostNow = topMost;
             Native.SetWindowPos(Handle, topMost ? Native.HWND_TOPMOST : Native.HWND_NOTOPMOST, 0, 0, 0, 0,
+                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER);
+        }
+
+        bool? topMostNow;
+
+        /// <summary>Keeps the overlay directly above <paramref name="target"/> in the z-order without making it
+        /// topmost: it covers the game, but any other app brought in front of the game also covers the overlay.
+        /// Cheap enough to call on every poll (it does nothing when already in place).</summary>
+        public void KeepJustAbove(IntPtr target)
+        {
+            if (!IsHandleCreated || target == IntPtr.Zero) return;
+            bool targetTop = (Native.GetWindowLong(target, Native.GWL_EXSTYLE) & Native.WS_EX_TOPMOST) != 0;
+            if (targetTop) { if (topMostNow != true) SetTopMost(true); return; }     // a topmost (exclusive fullscreen) game: follow it there
+            if (topMostNow != false) SetTopMost(false);
+            IntPtr prev = Native.GetWindow(target, Native.GW_HWNDPREV);
+            if (prev == Handle) return;
+            // SetWindowPos puts us just below "after": the window that is just above the game now.
+            IntPtr after = prev == IntPtr.Zero || (Native.GetWindowLong(prev, Native.GWL_EXSTYLE) & Native.WS_EX_TOPMOST) != 0
+                ? Native.HWND_TOP : prev;
+            Native.SetWindowPos(Handle, after, 0, 0, 0, 0,
                 Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER);
         }
 

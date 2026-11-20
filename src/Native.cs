@@ -15,7 +15,7 @@ namespace KavrosSlayerHelper
         public const int WS_EX_LAYERED = 0x00080000;
         public const int WS_EX_NOACTIVATE = 0x08000000;
         public const int GWL_EXSTYLE = -20;
-        public const int GW_OWNER = 4;
+        public const int GW_OWNER = 4, GW_HWNDPREV = 3;
 
         public static readonly IntPtr HWND_TOP = IntPtr.Zero;
         public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);

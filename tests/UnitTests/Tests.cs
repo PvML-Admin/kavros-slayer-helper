@@ -6,7 +6,7 @@ using KavrosSlayerHelper.Core;
 
 namespace KavrosSlayerHelper.Tests
 {
-    static class Program
+    static partial class Program
     {
         static int passed, failed;
         static void Ok(bool c, string what) { if (c) passed++; else { failed++; Console.WriteLine("FAIL: " + what); } }
@@ -31,6 +31,13 @@ namespace KavrosSlayerHelper.Tests
             Run("state", StateTests);
             Run("linediff", LineDiffTests);
             Run("view", ViewTests);
+            Run("dialogue", DialogueTests);
+            Run("counter", CounterTests);
+            Run("counter-apply", CounterApplyTests);
+            Run("placement", PlacementTests);
+            Run("finder", FinderTests);
+            Run("digits", DigitTests);
+            Run("real-fixtures", RealFixtureTests);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }

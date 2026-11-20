@@ -1,0 +1,194 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace KavrosSlayerHelper.Core
+{
+    /// <summary>One OCR line with its box (any consistent pixel space).</summary>
+    public sealed class TextLine
+    {
+        public string Text;
+        public float X, Y, W, H;
+        public TextLine() { }
+        public TextLine(string text, float x, float y, float w, float h) { Text = text; X = x; Y = y; W = w; H = h; }
+        public float Mid { get { return Y + H / 2f; } }
+        public override string ToString() { return Text; }
+    }
+
+    /// <summary>What the RS3 slayer counter shows.</summary>
+    public sealed class CounterRead
+    {
+        public int Left = -1, Points = -1, Streak = -1;
+        public string Task = "";
+        public TextLine NumberLine;          // the big number's OCR line (for digit learning)
+        public bool Valid { get { return Left >= 0 && (Points >= 0 || Streak >= 0 || Task.Length > 0); } }
+        public bool SameValues(CounterRead o)
+        {
+            return o != null && Left == o.Left && Points == o.Points && Streak == o.Streak && string.Equals(Task, o.Task, StringComparison.OrdinalIgnoreCase);
+        }
+        public override string ToString() { return "left=" + Left + " task=" + Task + " points=" + Points + " streak=" + Streak; }
+    }
+
+    /// <summary>Parses the slayer counter widget:
+    /// <code>
+    ///        135          (kills left, big yellow number)
+    ///      Dragons        (task, yellow)
+    /// Slayer points: 6,257
+    /// Task streak:     291
+    /// </code></summary>
+    public static class CounterParser
+    {
+        static readonly Regex PointsRe = new Regex(@"p\s*[o0]\s*[il1|!]?\s*[nm]\s*[t+]\s*s?\b[^0-9]{0,6}(?<n>[0-9OolI|][0-9OolI|,.\s]*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        static readonly Regex StreakRe = new Regex(@"s\s*t\s*r\s*[e3c]\s*[a4]?\s*[kx]\b[^0-9]{0,6}(?<n>[0-9OolI|][0-9OolI|,.\s]*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        static readonly Regex NumberOnly = new Regex(@"^[\s,.]*(?<n>[0-9OolI|][0-9OolI|,.\s]*)[\s,.]*$", RegexOptions.CultureInvariant);
+        static readonly Regex Letters = new Regex(@"[A-Za-z]{3,}", RegexOptions.CultureInvariant);
+
+        /// <summary>OCR lines that sit at the same height (a label and its value read apart) become one row.</summary>
+        public static List<TextLine> Rows(IEnumerable<TextLine> lines)
+        {
+            var sorted = lines.Where(l => l != null && !string.IsNullOrWhiteSpace(l.Text)).OrderBy(l => l.Mid).ToList();
+            var rows = new List<List<TextLine>>();
+            foreach (TextLine l in sorted)
+            {
+                List<TextLine> last = rows.Count > 0 ? rows[rows.Count - 1] : null;
+                if (last != null && Math.Abs(last.Average(x => x.Mid) - l.Mid) <= Math.Max(4f, Math.Min(last.Max(x => x.H), l.H) * 0.5f)) last.Add(l);
+                else rows.Add(new List<TextLine> { l });
+            }
+            return rows.Select(r =>
+            {
+                var o = r.OrderBy(x => x.X).ToList();
+                float x0 = o.Min(x => x.X), y0 = o.Min(x => x.Y), x1 = o.Max(x => x.X + x.W), y1 = o.Max(x => x.Y + x.H);
+                return new TextLine(string.Join(" ", o.Select(x => x.Text.Trim())), x0, y0, x1 - x0, y1 - y0);
+            }).ToList();
+        }
+
+        public static int Num(string s)
+        {
+            if (s == null) return -1;
+            var sb = new StringBuilder();
+            foreach (char c in s)
+            {
+                if (c >= '0' && c <= '9') sb.Append(c);
+                else if (c == 'O' || c == 'o') sb.Append('0');
+                else if (c == 'l' || c == 'I' || c == '|') sb.Append('1');
+            }
+            int n;
+            return sb.Length > 0 && sb.Length <= 9 && int.TryParse(sb.ToString(), out n) ? n : -1;
+        }
+
+        public static CounterRead Parse(IEnumerable<TextLine> lines)
+        {
+            var r = new CounterRead();
+            List<TextLine> rows = Rows(lines);
+            int numberRow = -1;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                string t = ChatParser.Clean(rows[i].Text);
+                Match m;
+                if ((m = PointsRe.Match(t)).Success)
+                { int n = Num(m.Groups["n"].Value); if (n >= 0) { r.Points = n; continue; } }
+                if ((m = StreakRe.Match(t)).Success)
+                { int n = Num(m.Groups["n"].Value); if (n >= 0) { r.Streak = n; continue; } }
+                if (r.Left < 0 && (m = NumberOnly.Match(t)).Success)
+                {
+                    int n = Num(m.Groups["n"].Value);
+                    if (n >= 0 && n < 100000) { r.Left = n; r.NumberLine = rows[i]; numberRow = i; continue; }
+                }
+                if (numberRow >= 0 && r.Task.Length == 0 && i > numberRow && Letters.IsMatch(t) && !Regex.IsMatch(t, @"\d"))
+                    r.Task = CleanTask(t);
+            }
+            // No separate number row: "135 Dragons" read as one line.
+            if (r.Left < 0)
+                foreach (TextLine row in rows)
+                {
+                    Match m = Regex.Match(ChatParser.Clean(row.Text), @"^(?<n>\d[\d,]*)\s+(?<t>[A-Za-z][A-Za-z' \-]+)$");
+                    if (m.Success && !PointsRe.IsMatch(row.Text) && !StreakRe.IsMatch(row.Text)) { r.Left = Num(m.Groups["n"].Value); r.Task = CleanTask(m.Groups["t"].Value); r.NumberLine = row; break; }
+                }
+            return r;
+        }
+
+        static string CleanTask(string t)
+        {
+            t = Regex.Replace(t, @"[^A-Za-z' \-]", " ");
+            t = Regex.Replace(t, @"\s+", " ").Trim();
+            return t;
+        }
+    }
+
+    /// <summary>The NPC dialogue box: the speaker (gold caps at the top) and the text under it.</summary>
+    public sealed class DialogueRead
+    {
+        public string Speaker = "";      // as read
+        public string Master;            // a known slayer master, or null
+        public string Text = "";         // body lines joined (line wraps undone)
+        public ChatEvent Event;          // what the patterns made of the text, or null
+    }
+
+    public static class DialogueParser
+    {
+        static readonly Regex Continue = new Regex(@"^\s*(click here to continue|continue|click to continue)\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        public static DialogueRead Parse(IEnumerable<TextLine> lines, ChatParser parser, SlayerData data)
+        {
+            var d = new DialogueRead();
+            List<TextLine> rows = CounterParser.Rows(lines);
+            var body = new List<string>();
+            for (int i = 0; i < rows.Count; i++)
+            {
+                string t = ChatParser.Clean(rows[i].Text);
+                if (t.Length == 0 || Continue.IsMatch(t)) continue;
+                if (d.Master == null && i <= 1)
+                {
+                    string letters = Regex.Replace(t, @"[^A-Za-z' ]", "").Trim();
+                    SlayerMaster m = data.FindMaster(letters);
+                    if (m != null) { d.Speaker = t; d.Master = m.Name; continue; }
+                    // A heading in caps that isn't a master (another NPC): still not body text.
+                    if (i == 0 && letters.Length >= 3 && letters == letters.ToUpperInvariant() && !t.Contains(" ") && rows.Count > 1) { d.Speaker = t; continue; }
+                }
+                body.Add(t);
+            }
+            d.Text = Regex.Replace(string.Join(" ", body), @"(\w)- (\w)", "$1$2");
+            d.Text = Regex.Replace(d.Text, @"\s+", " ").Trim();
+            if (parser != null && d.Text.Length > 0)
+            {
+                d.Event = parser.Parse(d.Text);
+                if (d.Event != null && d.Master != null) d.Event.Master = d.Master;
+            }
+            return d;
+        }
+    }
+
+    /// <summary>Only lets a counter reading through once it has been read the same way twice in a row
+    /// (a single misread digit never reaches the panel). The very first reading passes straight away
+    /// when nothing is known yet.</summary>
+    public sealed class CounterFilter
+    {
+        CounterRead pending, accepted;
+        public bool NeedsConfirm { get { return pending != null; } }
+        public CounterRead Accepted { get { return accepted; } }
+
+        public CounterRead Offer(CounterRead r, bool haveState)
+        {
+            if (r == null || !r.Valid) return null;
+            if (accepted != null && r.SameValues(accepted)) { pending = null; return null; }
+            if (accepted == null && !haveState) { accepted = r; pending = null; return r; }
+            if (pending != null && r.SameValues(pending)) { accepted = r; pending = null; return r; }
+            pending = r;
+            return null;
+        }
+
+        /// <summary>A reading that is already trusted (digit templates checked against the last value).</summary>
+        public CounterRead Accept(CounterRead r)
+        {
+            if (r == null || !r.Valid) return null;
+            pending = null;
+            if (accepted != null && r.SameValues(accepted)) return null;
+            accepted = r;
+            return r;
+        }
+
+        public void Reset() { pending = null; accepted = null; }
+    }
+}

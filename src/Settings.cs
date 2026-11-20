@@ -14,12 +14,14 @@ namespace KavrosSlayerHelper
         public string DebugAttachTitle = "";
         public bool Compact;
         public bool Minimised;
-        public int OffsetX = 12;            // panel position inside the game, px at 100 %
+        public int OffsetX = 12;            // panel position inside the game, px at 100 % (set by dragging the panel)
         public int OffsetY = 12;            // below the title bar
+        public int FreeX = int.MinValue;    // position when no game is open, screen px (set by dragging)
+        public int FreeY = int.MinValue;
         public int TitleBarHeight;          // 0 = the window's own caption, or 32 for a borderless client
-        public int ScanMs = 1000;           // chat read interval
-        public double[] ChatRegion;
-        public bool HideFromCapture;         // optional fixed chatbox: x, y, w, h as fractions of the game area
+        public int ScanMs = 1000;           // counter / dialogue read interval
+        public double[] CounterRegion;      // optional fixed slayer counter: x, y, w, h as fractions of the game area
+        public bool HideFromCapture;
 
         public static string Folder
         {
@@ -44,12 +46,13 @@ namespace KavrosSlayerHelper
                 s.Minimised = o.Bool("minimised");
                 s.OffsetX = Clamp(o.Int("offsetX", 12), 0, 4000);
                 s.OffsetY = Clamp(o.Int("offsetY", 12), 0, 4000);
+                if (o.Has("freeX") && o.Has("freeY")) { s.FreeX = Clamp(o.Int("freeX", 0), -20000, 20000); s.FreeY = Clamp(o.Int("freeY", 0), -20000, 20000); }
                 s.TitleBarHeight = Clamp(o.Int("titleBarHeight", 0), 0, 200);
                 s.ScanMs = Clamp(o.Int("scanMs", 1000), 300, 10000);
                 s.HideFromCapture = o.Bool("hideFromCapture");
-                List<object> r = o.Arr("chatRegion");
+                List<object> r = o.Arr("counterRegion");
                 if (r != null && r.Count == 4 && r.TrueForAll(x => x is double))
-                    s.ChatRegion = new[] { (double)r[0], (double)r[1], (double)r[2], (double)r[3] };
+                    s.CounterRegion = new[] { (double)r[0], (double)r[1], (double)r[2], (double)r[3] };
             }
             catch (Exception ex) { Log.Write("settings: could not read, using defaults: " + ex.Message); }
             if (string.IsNullOrWhiteSpace(s.ProcessName)) s.ProcessName = "kavrosclient";
@@ -68,9 +71,10 @@ namespace KavrosSlayerHelper
                 o["processName"] = ProcessName; o["windowTitle"] = WindowTitle; o["debugAttachTitle"] = DebugAttachTitle;
                 o["compact"] = Compact; o["minimised"] = Minimised;
                 o["offsetX"] = (double)OffsetX; o["offsetY"] = (double)OffsetY; o["titleBarHeight"] = (double)TitleBarHeight;
+                if (FreeX != int.MinValue) { o["freeX"] = (double)FreeX; o["freeY"] = (double)FreeY; }
                 o["scanMs"] = (double)ScanMs;
                 o["hideFromCapture"] = HideFromCapture;
-                o["chatRegion"] = ChatRegion == null ? null : (object)new List<object> { ChatRegion[0], ChatRegion[1], ChatRegion[2], ChatRegion[3] };
+                o["counterRegion"] = CounterRegion == null ? null : (object)new List<object> { CounterRegion[0], CounterRegion[1], CounterRegion[2], CounterRegion[3] };
                 Directory.CreateDirectory(Folder);
                 string tmp = FilePath + ".tmp";
                 File.WriteAllText(tmp, MiniJson.Write(o), new UTF8Encoding(false));

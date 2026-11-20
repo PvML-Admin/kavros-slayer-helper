@@ -43,7 +43,7 @@ namespace KavrosSlayerHelper.Core
             {
                 v.Kicker = "No task";
                 v.Title = "Waiting for a task";
-                v.ChatLine = string.IsNullOrEmpty(readerStatus) ? "Get a task or check your enchanted gem." : readerStatus;
+                v.ChatLine = string.IsNullOrEmpty(readerStatus) ? "Kills left are read from the slayer counter." : readerStatus;
                 return v;
             }
 
@@ -70,9 +70,12 @@ namespace KavrosSlayerHelper.Core
             else { v.KilledText = "\u2013 killed"; v.PercentText = ""; }
             v.Master = s.Master ?? "";
             if (s.LastSource == "manual") v.ChatLine = "Count set by hand";
+            else if (s.LastSource == "counter") v.ChatLine = "Read from the slayer counter";
+            else if (s.LastSource == "popup" && !string.IsNullOrEmpty(s.LastChat))
+                v.ChatLine = (string.IsNullOrEmpty(s.Master) ? "From the master" : "From " + s.Master) + ": \u201c" + s.LastChat + "\u201d";
             else if (!string.IsNullOrEmpty(s.LastChat)) v.ChatLine = "Read from chat: \u201c" + s.LastChat + "\u201d";
             else v.ChatLine = string.IsNullOrEmpty(readerStatus) ? "" : readerStatus;
-            if (s.Complete) v.ChatLine = string.IsNullOrEmpty(s.LastChat) ? "Task complete; return to a Slayer master" : v.ChatLine;
+            if (s.Complete) v.ChatLine = string.IsNullOrEmpty(s.LastChat) || s.LastSource == "counter" ? "Task complete; return to a Slayer master" : v.ChatLine;
 
             if (m != null)
             {

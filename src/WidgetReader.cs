@@ -1,0 +1,414 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using System.Threading;
+using KavrosSlayerHelper.Core;
+
+namespace KavrosSlayerHelper
+{
+    internal sealed class WidgetRead
+    {
+        public CounterRead Counter;           // a reading of the slayer counter, or null
+        public bool CounterDirect;            // read by digit templates (already trusted)
+        public List<TextLine> Dialogue;       // OCR lines of a dialogue box that just appeared or changed
+        public bool DialogueGone;             // no dialogue box on screen any more
+        public bool Forced;
+    }
+
+    /// <summary>Reads the RS3 slayer counter and the slayer master's dialogue box on a background thread.
+    /// The counter is found once by colour (yellow text stacked on a dark box) and confirmed by OCR, then only
+    /// its small region is captured; OCR runs only when its pixels change, and a kill is usually read by
+    /// digit templates without OCR. The whole game is captured every other second to spot a dialogue box
+    /// (parchment), which is OCR'd once per appearance.</summary>
+    internal sealed class WidgetReader : IDisposable
+    {
+        readonly WinOcr ocr = new WinOcr();
+        readonly Action<WidgetRead> deliver;          // called on the worker thread; the host marshals
+        readonly Func<bool> needConfirm;              // the host wants the counter read again even if unchanged
+        readonly Thread thread;
+        readonly AutoResetEvent wake = new AutoResetEvent(false);
+        volatile bool stop, rescan;
+        readonly object gate = new object();
+        Rectangle area;                               // game render area, screen px
+        bool active;
+        Rectangle exclude;                            // the panel, screen px
+        readonly double[] fixedCounter;               // optional settings.counterRegion (fractions of the area)
+
+        Box counter;                                  // locked counter region, relative to the area
+        long counterFp, counterRestFp, dialogueFp;
+        int counterMisses, searches, tick, lastLeft = -1;
+        Box numberRow;                                // the big number inside the counter region (region px)
+        readonly DigitReader digits = new DigitReader();
+
+        public int IntervalMs = 1000;
+        public volatile string Status = "Looking for the slayer counter\u2026";
+
+        public WidgetReader(Action<WidgetRead> deliver, Func<bool> needConfirm, double[] fixedCounter)
+        {
+            this.deliver = deliver;
+            this.needConfirm = needConfirm ?? (() => false);
+            this.fixedCounter = fixedCounter;
+            thread = new Thread(Loop) { IsBackground = true, Name = "widget reader" };
+            thread.SetApartmentState(ApartmentState.MTA);
+        }
+
+        public void Start() { thread.Start(); }
+
+        public void SetArea(Rectangle gameArea, bool gameActive)
+        {
+            lock (gate)
+            {
+                if (gameArea.Size != area.Size) { counter = Box.Empty; counterFp = 0; }   // resized: find it again
+                area = gameArea;
+                active = gameActive;
+            }
+            if (gameActive) wake.Set();
+        }
+
+        public void SetExclude(Rectangle r) { lock (gate) exclude = r; }
+
+        public void Rescan()
+        {
+            lock (gate) { counter = Box.Empty; counterFp = 0; dialogueFp = 0; }
+            rescan = true;
+            wake.Set();
+        }
+
+        void Loop()
+        {
+            while (!stop)
+            {
+                wake.WaitOne(IntervalMs);
+                if (stop) return;
+                Rectangle a; bool act;
+                lock (gate) { a = area; act = active; }
+                bool forced = rescan;
+                // Only while the game (or a Kavros helper) is in front: otherwise another app may cover it.
+                if (a.Width < 100 || a.Height < 100 || (!act && !forced)) continue;
+                rescan = false;
+                try { ScanOnce(a, forced); }
+                catch (Exception ex)
+                {
+                    if (stop) return;
+                    Status = "Could not read the screen (" + ex.GetType().Name + ")";
+                    Log.Write("reader: scan failed: " + ex);
+                    Thread.Sleep(2000);
+                }
+            }
+        }
+
+        void ScanOnce(Rectangle a, bool forced)
+        {
+            if (!ocr.Ready) { Status = ocr.Unavailable ?? "Windows text recognition is unavailable"; Thread.Sleep(5000); return; }
+            tick++;
+            var read = new WidgetRead { Forced = forced };
+            Box locked; Rectangle ex;
+            lock (gate) { locked = counter; ex = exclude; }
+            Box areaBox = new Box(0, 0, a.Width, a.Height);
+            if (locked.IsEmpty && fixedCounter != null)
+                locked = new Box((int)(a.Width * fixedCounter[0]), (int)(a.Height * fixedCounter[1]), (int)(a.Width * fixedCounter[2]), (int)(a.Height * fixedCounter[3])).Intersect(areaBox);
+            Box exRel = ex.Width > 0 ? new Box(ex.X - a.X, ex.Y - a.Y, ex.Width, ex.Height) : Box.Empty;
+
+            bool fullLook = forced || locked.IsEmpty || tick % 2 == 0;
+            RgbImage full = fullLook ? CaptureRgb(a, areaBox) : null;
+            if (full != null && !exRel.IsEmpty) Blank(full, exRel);
+
+            // ---- counter ----
+            if (!locked.IsEmpty)
+            {
+                RgbImage img = full != null ? full.Crop(locked) : CaptureRgb(a, locked);
+                if (full == null && !exRel.IsEmpty) Blank(img, new Box(exRel.X - locked.X, exRel.Y - locked.Y, exRel.W, exRel.H));
+                ReadCounter(img, locked, forced, read);
+            }
+            else if (full != null)
+            {
+                SearchCounter(full, read);
+            }
+
+            // ---- dialogue ----
+            if (full != null)
+            {
+                Box d = WidgetFinder.FindDialogue(full);
+                if (d.IsEmpty)
+                {
+                    if (dialogueFp != 0) { dialogueFp = 0; read.DialogueGone = true; }
+                }
+                else
+                {
+                    long fp = WidgetFinder.Fingerprint(full, d);
+                    if (fp != dialogueFp || forced)
+                    {
+                        dialogueFp = fp;
+                        read.Dialogue = OcrDialogue(full, d);
+                        if (Log.Verbose) Log.Write("dialogue at " + d + ": " + string.Join(" | ", read.Dialogue.Select(l => l.Text)));
+                    }
+                }
+            }
+            if (read.Counter != null || read.Dialogue != null || read.DialogueGone || forced) deliver(read);
+        }
+
+        void ReadCounter(RgbImage img, Box region, bool forced, WidgetRead read)
+        {
+            Box all = new Box(0, 0, img.W, img.H);
+            long fp = WidgetFinder.Fingerprint(img, all);
+            if (fp == counterFp && !forced && !needConfirm()) return;    // nothing changed: no OCR at all
+            // A kill changes only the big number: read it by template when the rest is as it was.
+            if (!forced && !numberRow.IsEmpty && digits.Known > 0 && lastLeft > 0)
+            {
+                Box rest = new Box(0, numberRow.Bottom, img.W, Math.Max(1, img.H - numberRow.Bottom));
+                long restFp = WidgetFinder.Fingerprint(img, rest);
+                int n = digits.Read(img, numberRow);
+                if (restFp == counterRestFp && n >= 0 && lastLeft - n >= 1 && lastLeft - n <= 5)
+                {
+                    counterFp = fp;
+                    lastLeft = n;
+                    read.Counter = new CounterRead { Left = n, Task = lastTask, Points = lastPoints, Streak = lastStreak };
+                    read.CounterDirect = true;
+                    return;
+                }
+            }
+            CounterRead r = CounterParser.Parse(OcrLines(img, all, 3f, false));
+            if (r.Valid)
+            {
+                counterFp = fp;
+                counterMisses = 0;
+                Status = "";
+                Remember(r, img);
+                read.Counter = r;
+            }
+            else if (++counterMisses >= 6 && fixedCounter == null)
+            {
+                // Closed or moved: look for it again (the panel keeps the last values meanwhile).
+                lock (gate) counter = Box.Empty;
+                counterMisses = 0;
+                counterFp = 0;
+                Status = "Looking for the slayer counter\u2026";
+                Log.Write("counter: lost at " + region);
+            }
+        }
+
+        string lastTask = ""; int lastPoints = -1, lastStreak = -1;
+
+        void Remember(CounterRead r, RgbImage img)
+        {
+            lastLeft = r.Left; lastTask = r.Task; lastPoints = r.Points; lastStreak = r.Streak;
+            numberRow = Box.Empty;
+            if (r.NumberLine != null)
+            {
+                var row = new Box((int)r.NumberLine.X - 3, (int)r.NumberLine.Y - 2, (int)r.NumberLine.W + 6, (int)r.NumberLine.H + 4).Intersect(new Box(0, 0, img.W, img.H));
+                // Learning succeeds only when the glyph count matches what OCR read.
+                if (!row.IsEmpty && digits.Learn(img, row, r.Left.ToString()))
+                {
+                    numberRow = row;
+                    counterRestFp = WidgetFinder.Fingerprint(img, new Box(0, row.Bottom, img.W, Math.Max(1, img.H - row.Bottom)));
+                }
+            }
+        }
+
+        void SearchCounter(RgbImage full, WidgetRead read)
+        {
+            searches++;
+            List<Box> cands = WidgetFinder.FindCounterCandidates(full);
+            foreach (Box c in cands.Take(2))
+            {
+                RgbImage img = full.Crop(c);
+                CounterRead r = CounterParser.Parse(OcrLines(img, new Box(0, 0, img.W, img.H), 3f, false));
+                if (!r.Valid) continue;
+                Lock(c, full, img, r, read, "colour");
+                return;
+            }
+            // Fallback every 5th look: OCR the whole game for the counter's labels.
+            if (searches % 5 != 0) { Status = "Looking for the slayer counter\u2026"; return; }
+            List<TextLine> lines = OcrLines(full, new Box(0, 0, full.W, full.H), 1.5f, false);
+            TextLine label = lines.FirstOrDefault(l => Regex.IsMatch(l.Text, @"slayer\s*p[o0]i?nts|task\s*str", RegexOptions.IgnoreCase));
+            if (label == null) { Status = "Looking for the slayer counter\u2026"; return; }
+            float lh = Math.Max(8, label.H);
+            var box = new Box((int)(label.X - lh * 3), (int)(label.Y - lh * 6), (int)(label.W + lh * 6), (int)(lh * 10)).Intersect(new Box(0, 0, full.W, full.H));
+            RgbImage cimg = full.Crop(box);
+            CounterRead cr = CounterParser.Parse(OcrLines(cimg, new Box(0, 0, cimg.W, cimg.H), 3f, false));
+            if (cr.Valid) Lock(box, full, cimg, cr, read, "labels");
+            else Status = "Looking for the slayer counter\u2026";
+        }
+
+        void Lock(Box c, RgbImage full, RgbImage img, CounterRead r, WidgetRead read, string how)
+        {
+            lock (gate) counter = c;
+            counterFp = WidgetFinder.Fingerprint(img, new Box(0, 0, img.W, img.H));
+            counterMisses = 0;
+            Status = "";
+            Remember(r, img);
+            read.Counter = r;
+            Log.Write("counter: found by " + how + " at " + c + " (" + r + ")");
+        }
+
+        List<TextLine> OcrDialogue(RgbImage full, Box d)
+        {
+            RgbImage img = full.Crop(d);
+            List<TextLine> lines = OcrLines(img, new Box(0, 0, img.W, img.H), 2f, true);
+            // The portrait on the left reads as noise: drop lines that end before the text column starts.
+            var texty = lines.Where(l => l.Text.Count(char.IsLetter) >= 12).ToList();
+            if (texty.Count > 0)
+            {
+                float textLeft = texty.Min(l => l.X);
+                lines = lines.Where(l => l.X + l.W > textLeft + 4 && l.Text.Count(char.IsLetter) >= 2).ToList();
+            }
+            return lines;
+        }
+
+        /// <summary>OCR lines of a region of <paramref name="img"/>, in image pixels.</summary>
+        List<TextLine> OcrLines(RgbImage img, Box region, float scale, bool darkOnLight)
+        {
+            var result = new List<TextLine>();
+            if (stop) return result;
+            using (Bitmap src = ToBitmap(img, region))
+            using (Bitmap prepared = darkOnLight ? PrepareDarkOnLight(src, scale) : PrepareLightOnDark(src, scale))
+            {
+                foreach (var kv in ocr.Read(prepared))
+                {
+                    RectangleF b = kv.Value;
+                    result.Add(new TextLine(kv.Key, region.X + b.X / scale, region.Y + b.Y / scale, b.Width / scale, b.Height / scale));
+                }
+            }
+            return result;
+        }
+
+        // ---- pixels ----------------------------------------------------------------------------------
+        static RgbImage CaptureRgb(Rectangle a, Box r)
+        {
+            using (var bmp = new Bitmap(r.W, r.H, PixelFormat.Format24bppRgb))
+            {
+                using (Graphics g = Graphics.FromImage(bmp))
+                    g.CopyFromScreen(new Point(a.X + r.X, a.Y + r.Y), Point.Empty, new Size(r.W, r.H), CopyPixelOperation.SourceCopy);
+                return FromBitmap(bmp);
+            }
+        }
+
+        public static RgbImage FromBitmap(Bitmap bmp)
+        {
+            var img = new RgbImage(bmp.Width, bmp.Height);
+            BitmapData d = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            try
+            {
+                var row = new byte[d.Stride];
+                for (int y = 0; y < bmp.Height; y++)
+                {
+                    Marshal.Copy(d.Scan0 + y * d.Stride, row, 0, d.Stride);
+                    for (int x = 0; x < bmp.Width; x++)
+                    {
+                        int s = x * 3, t = (y * bmp.Width + x) * 3;
+                        img.Px[t] = row[s + 2]; img.Px[t + 1] = row[s + 1]; img.Px[t + 2] = row[s];   // BGR -> RGB
+                    }
+                }
+            }
+            finally { bmp.UnlockBits(d); }
+            return img;
+        }
+
+        static Bitmap ToBitmap(RgbImage img, Box r)
+        {
+            r = r.Intersect(new Box(0, 0, img.W, img.H));
+            var bmp = new Bitmap(Math.Max(1, r.W), Math.Max(1, r.H), PixelFormat.Format24bppRgb);
+            BitmapData d = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            try
+            {
+                var row = new byte[d.Stride];
+                for (int y = 0; y < r.H; y++)
+                {
+                    for (int x = 0; x < r.W; x++)
+                    {
+                        int s = ((r.Y + y) * img.W + r.X + x) * 3, t = x * 3;
+                        row[t] = img.Px[s + 2]; row[t + 1] = img.Px[s + 1]; row[t + 2] = img.Px[s];
+                    }
+                    Marshal.Copy(row, 0, d.Scan0 + y * d.Stride, d.Stride);
+                }
+            }
+            finally { bmp.UnlockBits(d); }
+            return bmp;
+        }
+
+        static void Blank(RgbImage img, Box r)
+        {
+            r = r.Inflate(4, 4).Intersect(new Box(0, 0, img.W, img.H));
+            for (int y = r.Y; y < r.Bottom; y++) Array.Clear(img.Px, (y * img.W + r.X) * 3, r.W * 3);
+        }
+
+        static Bitmap Upscale(Bitmap src, float scale)
+        {
+            int w = Math.Max(1, (int)(src.Width * scale)), h = Math.Max(1, (int)(src.Height * scale));
+            var big = new Bitmap(w, h, PixelFormat.Format24bppRgb);
+            using (Graphics g = Graphics.FromImage(big))
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.DrawImage(src, new Rectangle(0, 0, w, h));
+            }
+            return big;
+        }
+
+        /// <summary>Counter: yellow and white text on a dark, see-through box -> dark text on white
+        /// (brightness = strongest channel, stretched above the background level, inverted).</summary>
+        public static Bitmap PrepareLightOnDark(Bitmap src, float scale)
+        {
+            Bitmap big = Upscale(src, scale);
+            Map(big, (r, g, b) => Math.Max(r, Math.Max(g, b)), 55, true);
+            return big;
+        }
+
+        /// <summary>Dialogue: dark-brown text and the gold speaker name on parchment. The blue channel
+        /// separates both from the parchment best (parchment is light in blue, gold and brown are not).</summary>
+        public static Bitmap PrepareDarkOnLight(Bitmap src, float scale)
+        {
+            Bitmap big = Upscale(src, scale);
+            Map(big, (r, g, b) => b, 70, false);
+            return big;
+        }
+
+        static void Map(Bitmap big, Func<int, int, int, int> channel, int percentile, bool textIsBright)
+        {
+            int w = big.Width, h = big.Height;
+            BitmapData d = big.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
+            try
+            {
+                int stride = d.Stride;
+                var px = new byte[stride * h];
+                Marshal.Copy(d.Scan0, px, 0, px.Length);
+                var hist = new int[256];
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        int i = y * stride + x * 3;
+                        int v = channel(px[i + 2], px[i + 1], px[i]);
+                        px[i] = (byte)v;
+                        hist[v]++;
+                    }
+                int total = w * h, acc = 0, bg = 0;
+                for (int v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * percentile / 100) { bg = v; break; } }
+                int lo, hi;
+                if (textIsBright) { lo = Math.Min(230, bg + 28); hi = Math.Min(255, lo + 90); }
+                else { hi = Math.Max(30, bg - 20); lo = Math.Max(0, hi - 80); }
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        int i = y * stride + x * 3;
+                        int v = px[i];
+                        int t = v <= lo ? 0 : v >= hi ? 255 : (v - lo) * 255 / Math.Max(1, hi - lo);
+                        byte o = textIsBright ? (byte)(255 - t) : (byte)t;
+                        px[i] = o; px[i + 1] = o; px[i + 2] = o;
+                    }
+                Marshal.Copy(px, 0, d.Scan0, px.Length);
+            }
+            finally { big.UnlockBits(d); }
+        }
+
+        public void Dispose()
+        {
+            stop = true;
+            wake.Set();
+        }
+    }
+}

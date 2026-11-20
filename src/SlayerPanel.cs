@@ -30,6 +30,13 @@ namespace KavrosSlayerHelper
         public event Action<int> Wheel;             // +1 / -1 on the count
         public event Action<int?> EditFinished;     // the typed count, or null if cancelled
         public event Action EditStarted;
+        /// <summary>Dragging by the header or any empty part: the wanted top-left (screen px), and the end of the drag.</summary>
+        public event Action<Point> DragMoved;
+        public event Action DragEnded;
+
+        bool dragArmed, dragging;
+        Point dragStartMouse, dragStartWindow;
+        public bool Dragging { get { return dragging; } }
 
         public SlayerPanel()
         {
@@ -266,8 +273,9 @@ namespace KavrosSlayerHelper
             using (var p = new Pen(ic, 1.2f * s) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
             {
                 float x0 = min.X + 6 * s, y0 = min.Y + 6 * s;
-                if (minimised) g.DrawRectangle(p, x0 + 1.4f * s, y0 + 1.4f * s, 7.2f * s, 7.2f * s);
-                else g.DrawLine(p, x0 + 1.6f * s, y0 + 5 * s, x0 + 8.4f * s, y0 + 5 * s);
+                // "–" minimises; when minimised it becomes "+" to expand again.
+                g.DrawLine(p, x0 + 1.6f * s, y0 + 5 * s, x0 + 8.4f * s, y0 + 5 * s);
+                if (minimised) g.DrawLine(p, x0 + 5 * s, y0 + 1.6f * s, x0 + 5 * s, y0 + 8.4f * s);
             }
             float titleRight = right - 22;
             if (!minimised)
@@ -337,7 +345,7 @@ namespace KavrosSlayerHelper
                         Draw(g, MetaSt, by, x0 * s, mb * s, s);
                         Draw(g, MetaBoldSt, Fit(g, MetaBoldSt, v.Master, w * s - W(g, MetaSt, by, s), s), x0 * s + W(g, MetaSt, by, s), mb * s, s);
                     }
-                    else Draw(g, MetaSt, v.Complete ? "Return to a Slayer master for a new task" : "Master not read from chat yet", x0 * s, mb * s, s);
+                    else Draw(g, MetaSt, v.Complete ? "Return to a Slayer master for a new task" : "Master not read yet", x0 * s, mb * s, s);
                 }
                 y += MetaSt.Box;
             }
@@ -345,7 +353,7 @@ namespace KavrosSlayerHelper
             {
                 y += 2 + 5;
                 float mb = y + MetaSt.BaselineInBox;
-                if (draw) Draw(g, MetaSt, Fit(g, MetaSt, "Talk to a Slayer master; the task is read from chat.", w * s, s), x0 * s, mb * s, s);
+                if (draw) Draw(g, MetaSt, Fit(g, MetaSt, "Talk to a Slayer master or open the slayer counter.", w * s, s), x0 * s, mb * s, s);
                 y += MetaSt.Box;
             }
             if (!string.IsNullOrEmpty(v.ChatLine))
@@ -591,6 +599,17 @@ namespace KavrosSlayerHelper
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (dragArmed)
+            {
+                Point c = Control.MousePosition;
+                int dx = c.X - dragStartMouse.X, dy = c.Y - dragStartMouse.Y;
+                if (!dragging && (Math.Abs(dx) > 3 || Math.Abs(dy) > 3)) { dragging = true; Capture = true; }
+                if (dragging)
+                {
+                    if (DragMoved != null) DragMoved(new Point(dragStartWindow.X + dx, dragStartWindow.Y + dy));
+                    return;
+                }
+            }
             Hit h = HitAt(e.Location);
             bool overMonster = !compact && !minimised && RectangleF.Inflate(monsterBlock, 0, 2).Contains(e.Location);
             if (h != hover || overMonster != hoverMonster)
@@ -604,6 +623,7 @@ namespace KavrosSlayerHelper
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
+            if (dragging) return;
             if (hover != Hit.None || hoverMonster) { hover = Hit.None; hoverMonster = false; Present(); }
         }
 
@@ -612,12 +632,23 @@ namespace KavrosSlayerHelper
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
             pressed = HitAt(e.Location);
-            if (pressed != Hit.None) Present();
+            if (pressed != Hit.None) { Present(); return; }
+            // Not on a button: start a (possible) drag.
+            dragArmed = true;
+            dragging = false;
+            dragStartMouse = Control.MousePosition;
+            dragStartWindow = Location;
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (dragArmed)
+            {
+                bool wasDragging = dragging;
+                dragArmed = false; dragging = false;
+                if (wasDragging) { Capture = false; if (DragEnded != null) DragEnded(); return; }
+            }
             Hit h = HitAt(e.Location);
             Hit was = pressed;
             pressed = Hit.None;
@@ -688,6 +719,12 @@ namespace KavrosSlayerHelper
             if (!Editing) return;
             if (char.IsDigit(e.KeyChar) && editText.Length < 5) { editText += e.KeyChar; Present(); }
             e.Handled = true;
+        }
+
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (dragging && !Capture) { dragArmed = false; dragging = false; if (DragEnded != null) DragEnded(); }
         }
 
         protected override void OnDeactivate(EventArgs e)

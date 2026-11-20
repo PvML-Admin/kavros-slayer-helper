@@ -19,7 +19,7 @@ namespace KavrosSlayerHelper.Core
         public int Points;
         public int LastPoints = -1;      // points from the last completed task, -1 = unknown
         public string LastChat = "";     // what the panel says it read ("only 142 more to go")
-        public string LastSource = "";   // "chat" or "manual"
+        public string LastSource = "";   // "counter", "popup", "chat" (0.1.0) or "manual"
         public DateTime Updated;
 
         public bool HasTask { get { return !string.IsNullOrEmpty(Monster); } }
@@ -107,7 +107,10 @@ namespace KavrosSlayerHelper.Core
         }
 
         /// <summary>Applies one parsed chat event. Returns true if anything changed.</summary>
-        public bool Apply(ChatEvent e)
+        public bool Apply(ChatEvent e) { return Apply(e, "chat"); }
+
+        /// <summary>Applies one parsed event; <paramref name="source"/> is "popup" for the master's dialogue.</summary>
+        public bool Apply(ChatEvent e, string source)
         {
             if (e == null) return false;
             SlayerState s = State;
@@ -176,8 +179,49 @@ namespace KavrosSlayerHelper.Core
                 }
                 default: return false;
             }
-            s.LastChat = Quote(e.Snippet);
-            s.LastSource = "chat";
+            s.LastChat = Quote(source == "popup" && !string.IsNullOrEmpty(e.Line) ? e.Line : e.Snippet);
+            s.LastSource = source;
+            s.Updated = Now();
+            return true;
+        }
+
+        /// <summary>Applies a reading of the RS3 slayer counter, the source of truth for the count while it is
+        /// on screen. The counter can show more than was assigned (extensions): the assigned amount grows to match.</summary>
+        public bool ApplyCounter(CounterRead r)
+        {
+            if (r == null || !r.Valid) return false;
+            SlayerState s = State;
+            bool changed = false;
+            string name = s.Monster ?? "";
+            if (!string.IsNullOrEmpty(r.Task))
+            {
+                MonsterInfo m = Data.FindMonster(r.Task);
+                // A task name OCR couldn't place never replaces a known task (it is more likely a misread).
+                if (m != null) name = m.Name;
+                else if (!s.HasTask) name = Canonical(r.Task);
+            }
+            if (name.Length == 0) name = s.Monster ?? "";
+            if (name.Length > 0 && name != s.Monster)
+            {
+                s.Monster = name;
+                s.Assigned = Math.Max(0, r.Left);
+                s.Master = GuessMaster(name, 0, null);
+                s.Complete = false;
+                changed = true;
+            }
+            if (name.Length > 0 && r.Left >= 0 && r.Left != s.Left)
+            {
+                s.Left = r.Left;
+                changed = true;
+            }
+            if (s.HasTask && s.Left >= 0 && s.Assigned < s.Left) { s.Assigned = s.Left; changed = true; }
+            bool done = s.HasTask && s.Left == 0;
+            if (done != s.Complete && s.HasTask) { s.Complete = done; changed = true; }
+            if (r.Streak >= 0 && r.Streak != s.Streak) { s.Streak = r.Streak; changed = true; }
+            if (r.Points >= 0 && r.Points != s.Points) { s.Points = r.Points; changed = true; }
+            if (!changed && s.LastSource == "counter") return false;
+            s.LastChat = "";
+            s.LastSource = "counter";
             s.Updated = Now();
             return true;
         }

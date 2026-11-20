@@ -467,14 +467,15 @@ def chat_patterns():
     amount), left (kills left), streak, points, total. From the RS3 transcripts on the wiki."""
     return OrderedDict([
         ("assign", [
-            r"new task is to kill (?<count>\d[\d,.]*) (?<monster>[^.;!?]+)",
+            r"(?:new )?task is to kill (?<count>\d[\d,.]*) (?!more )(?<monster>[^.;!?]+)",
             r"start you off hunting (?<monster>[^.;!?]+?)[.;,]? ?you'?ll need to kill (?<count>\d[\d,.]*)",
-            r"you need to kill (?<count>\d[\d,.]*) (?<monster>[^.;!?]+)",
+            r"you need to kill (?<count>\d[\d,.]*) (?!more )(?<monster>[^.;!?]+)",
             r"go and kill (?<count>\d[\d,.]*) (?<monster>[^.;!?]+)",
-            r"new task is to kill (?<monster>[a-z][^.;!?\d]+)",
+            r"(?:new )?task is to kill (?<monster>[a-z][^.;!?\d]+)",
         ]),
         ("progress", [
             r"assigned to kill (?<monster>[^;:]+?)\s*[;:,.]\s*only (?<left>\d[\d,.]*) more to go",
+            r"kill (?<left>\d[\d,.]*) more (?<monster>[^.;!?]+)",
             r"you still need to kill (?<left>\d[\d,.]*) (?:monsters? )?to complete your (?:current )?slayer",
             r"(?<left>\d[\d,.]*) (?:more )?(?:kills? )?(?:left|remaining) (?:on|for|in) your (?:slayer )?task",
             r"slayer task[^.]*?(?<left>\d[\d,.]*) (?:kills? )?(?:left|remaining)",

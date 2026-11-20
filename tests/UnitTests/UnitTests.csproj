@@ -14,5 +14,6 @@
     <Compile Include="../../src/Core/*.cs" />
     <Compile Include="*.cs" />
     <None Include="../../data/slayer.json" Link="slayer.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../fixtures/**/*.png" LinkBase="fixtures" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

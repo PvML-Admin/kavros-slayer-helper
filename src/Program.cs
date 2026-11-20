@@ -8,17 +8,17 @@ using KavrosSlayerHelper.Core;
 
 [assembly: System.Reflection.AssemblyTitle("Kavros Slayer Helper")]
 [assembly: System.Reflection.AssemblyProduct("Kavros Slayer Helper")]
-[assembly: System.Reflection.AssemblyDescription("Kavros Slayer Helper by Meleeman112: reads your slayer task from chat")]
+[assembly: System.Reflection.AssemblyDescription("Kavros Slayer Helper by Meleeman112: reads your slayer task from the slayer counter and the master's dialogue")]
 [assembly: System.Reflection.AssemblyCompany("Meleeman112")]
-[assembly: System.Reflection.AssemblyVersion("0.1.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("0.1.0")]
+[assembly: System.Reflection.AssemblyVersion("0.1.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.1.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("0.1.1")]
 
 namespace KavrosSlayerHelper
 {
     internal static class Program
     {
-        public const string Version = "0.1.0";
+        public const string Version = "0.1.1";
 
         [STAThread]
         static int Main(string[] args)
@@ -45,7 +45,7 @@ namespace KavrosSlayerHelper
                         "KavrosSlayerHelper.exe [options]\n\n" +
                         "--attach \"<title>\"   Debug: dock over any window whose title contains <title>\n" +
                         "--demo               Show an example task (nothing is saved)\n" +
-                        "--no-ocr             Do not read chat\n" +
+                        "--no-ocr             Do not read the screen\n" +
                         "--render <png>       Draw the panel to a PNG and exit (--mode full|compact|minimised|empty, --scale n, --hover)\n" +
                         "--verbose            Echo the log to the console\n\n" +
                         "Data and settings: " + Settings.Folder,
@@ -80,17 +80,17 @@ namespace KavrosSlayerHelper
                 SlayerData data = SlayerData.Load(json, null);
                 var state = new SlayerState
                 {
-                    Monster = monster ?? "Abyssal demons", Master = "Kuradal", Assigned = 187, Left = 142, Streak = 47, Points = 1240,
-                    LastChat = "only 142 more to go", LastSource = "chat",
+                    Monster = monster ?? "Dragons", Master = "Laniakea", Assigned = 135, Left = 118, Streak = 291, Points = 6257,
+                    LastChat = "", LastSource = "counter",
                 };
-                if (mode == "empty") state = new SlayerState { Streak = 47, Points = 1240 };
+                if (mode == "empty") state = new SlayerState { Streak = 291, Points = 6257 };
                 var t = new SlayerTracker(data, state);
                 using (var panel = new SlayerPanel())
                 {
                     panel.Compact = mode == "compact";
                     panel.Minimised = mode == "minimised";
                     panel.SetHoverForDemo(hover);
-                    panel.SetView(PanelView.Build(t, mode == "empty" ? "Reading chat\u2026" : ""));
+                    panel.SetView(PanelView.Build(t, mode == "empty" ? "Looking for the slayer counter\u2026" : ""));
                     using (var bmp = panel.RenderToBitmap(scale <= 0 ? 1 : scale)) bmp.Save(path, ImageFormat.Png);
                 }
                 Console.WriteLine("rendered " + path);

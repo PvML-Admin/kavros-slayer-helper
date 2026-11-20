@@ -46,6 +46,8 @@ namespace KavrosSlayerHelper
         public ClientState State;
         public event Action Changed;
         public event Action ForegroundChanged;
+        /// <summary>After every poll (200 ms), changed or not.</summary>
+        public event Action Polled;
 
         public ClientTracker(Func<Settings> settings, Func<IntPtr, bool> isOwnWindow)
         {
@@ -53,7 +55,7 @@ namespace KavrosSlayerHelper
             this.isOwnWindow = isOwnWindow;
             hookProc = OnWinEvent;
             poll.Interval = 200;
-            poll.Tick += delegate { Refresh(false); };
+            poll.Tick += delegate { Refresh(false); if (Polled != null) Polled(); };
         }
 
         public void Start()
