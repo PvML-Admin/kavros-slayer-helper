@@ -59,7 +59,10 @@ namespace KavrosSlayerHelper
         volatile DebugFrame lastFrame;                // the last full capture and what was found in it
         readonly DigitReader digits = NewDigits();
 
+        readonly DigitReader smallDigits = NewSmallDigits();
+
         static DigitReader NewDigits() { var d = new DigitReader(); DigitFont.SeedInto(d); return d; }
+        static DigitReader NewSmallDigits() { var d = new DigitReader(); DigitFont.SeedSmallInto(d); return d; }
 
         public int IntervalMs = 1000;
         public volatile string Status = "Looking for the slayer counter\u2026";
@@ -87,6 +90,16 @@ namespace KavrosSlayerHelper
         }
 
         public void SetExclude(Rectangle r) { lock (gate) exclude = r; }
+
+        Timer nudgeTimer;
+        /// <summary>Look again shortly (about 0.1 s) instead of after the full interval: the host is waiting for
+        /// a second frame to confirm a changed count, so a kill shows within about a second.</summary>
+        public void Nudge()
+        {
+            if (stop) return;
+            if (nudgeTimer == null) nudgeTimer = new Timer(_ => { if (!stop) wake.Set(); });
+            nudgeTimer.Change(120, Timeout.Infinite);
+        }
 
         public void Rescan()
         {
@@ -133,6 +146,7 @@ namespace KavrosSlayerHelper
             bool fullLook = forced || locked.IsEmpty || tick % 2 == 0;
             RgbImage full = fullLook ? CaptureRgb(a, areaBox) : null;
             if (full != null && !exRel.IsEmpty) Blank(full, exRel);
+            if (full != null) foreach (Box k in WidgetFinder.FindClocks(full)) BlankExact(full, k);   // the clock is never read
             DebugFrame dbg = full != null ? new DebugFrame { Full = full, Area = a, Locked = locked, LockedMinimised = lockedMinimised } : null;
 
             // ---- counter ----
@@ -140,6 +154,7 @@ namespace KavrosSlayerHelper
             {
                 RgbImage img = full != null ? full.Crop(locked) : CaptureRgb(a, locked);
                 if (full == null && !exRel.IsEmpty) Blank(img, new Box(exRel.X - locked.X, exRel.Y - locked.Y, exRel.W, exRel.H));
+                if (full == null) foreach (Box k in WidgetFinder.FindClocks(img)) BlankExact(img, k);
                 ReadCounter(img, locked, forced, read);
                 if (dbg != null) dbg.Notes.Add("locked counter " + locked + (lockedMinimised ? " (minimised)" : "") + " -> " + (read.Counter != null ? read.Counter.ToString() : "no new read"));
                 // Locked on the minimised counter: now and then look for the expanded one (task, points, streak).
@@ -183,11 +198,12 @@ namespace KavrosSlayerHelper
             // Unchanged pixels: nothing to do, unless the host is confirming a change (it wants the same
             // reading on consecutive frames before adopting it).
             if (fp == counterFp && !forced && !needConfirm()) return;
-            Box row = NumberRow(img);
+            Layout lay = FindLayout(img);
+            Box row = lay.Number;
             int byDigits = row.IsEmpty ? -1 : digits.Read(img, row);
             // Only the number changed (a kill) and the digit shapes are sure of it: no OCR at all.
-            if (!forced && byDigits >= 0 && lastLeft >= 0 && !numberRow.IsEmpty && row.Equals(numberRow)
-                && WidgetFinder.Fingerprint(img, Rest(img, row)) == counterRestFp)
+            if (!forced && byDigits >= 0 && lastLeft >= 0 && !numberRow.IsEmpty && SameRow(row, numberRow)
+                && WidgetFinder.Fingerprint(img, Rest(img, numberRow)) == counterRestFp)
             {
                 counterFp = fp;
                 counterMisses = 0;
@@ -196,8 +212,9 @@ namespace KavrosSlayerHelper
                 read.CounterBy = "digits";
                 return;
             }
-            CounterRead r = CounterParser.Parse(OcrLines(img, all, 3f, false));
+            CounterRead r = CounterParser.Parse(OcrLines(img, FromCountDown(img, row), 3f, false));
             string by = FixNumber(img, row, byDigits, ref r);
+            if (r.Left >= 0) FixValues(img, lay, r);
             if (r.Valid)
             {
                 counterFp = fp;
@@ -245,15 +262,47 @@ namespace KavrosSlayerHelper
             return "unsure";
         }
 
-        /// <summary>The big number's row inside a counter crop, found from the layout (expanded: the top row
-        /// of the stack; minimised: the lone number), padded for the digit reader. Empty when unclear.</summary>
-        static Box NumberRow(RgbImage img)
+        struct Layout { public Box Number, Points, Streak; }
+
+        /// <summary>The counter's rows inside a crop, from its structure: the count on top, the task under it,
+        /// then the points and streak values (expanded), or the lone count (minimised). Padded for the digit
+        /// readers; empty boxes when unclear.</summary>
+        static Layout FindLayout(RgbImage img)
         {
+            var lay = new Layout();
+            Box all = new Box(0, 0, img.W, img.H);
             List<CounterCandidate> ex = WidgetFinder.FindCounters(img);
-            if (ex.Count > 0 && ex[0].Rows.Count >= 3 && ex[0].Score >= 4) return ex[0].Rows[0].Inflate(2, 2).Intersect(new Box(0, 0, img.W, img.H));
+            if (ex.Count > 0 && ex[0].Rows.Count >= 3 && ex[0].Score >= 4)
+            {
+                List<Box> rows = ex[0].Rows;
+                lay.Number = rows[0].Inflate(2, 2).Intersect(all);
+                if (rows.Count == 4) { lay.Points = rows[2].Inflate(2, 2).Intersect(all); lay.Streak = rows[3].Inflate(2, 2).Intersect(all); }
+                return lay;
+            }
             List<CounterCandidate> mi = WidgetFinder.FindMinimisedCounters(img);
-            if (mi.Count > 0) return mi[0].Text.Inflate(2, 2).Intersect(new Box(0, 0, img.W, img.H));
-            return Box.Empty;
+            if (mi.Count > 0) lay.Number = mi[0].Text.Inflate(2, 2).Intersect(all);
+            return lay;
+        }
+
+        /// <summary>OCR only from the count row down: nothing above the count (the clock) is ever read.</summary>
+        static Box FromCountDown(RgbImage img, Box row)
+        {
+            if (row.IsEmpty) return new Box(0, 0, img.W, img.H);
+            int top = Math.Max(0, row.Y - 3);
+            return new Box(0, top, img.W, img.H - top);
+        }
+
+        /// <summary>Points and streak by the small digit shapes (commas skipped), over whatever OCR made of them.</summary>
+        void FixValues(RgbImage img, Layout lay, CounterRead r)
+        {
+            if (!lay.Points.IsEmpty) { int p = smallDigits.Read(img, lay.Points); if (p >= 0) { if (r.Points >= 0 && r.Points != p) Log.Write("counter: OCR points " + r.Points + ", digits " + p + " (using digits)"); r.Points = p; } }
+            if (!lay.Streak.IsEmpty) { int st = smallDigits.Read(img, lay.Streak); if (st >= 0) { if (r.Streak >= 0 && r.Streak != st) Log.Write("counter: OCR streak " + r.Streak + ", digits " + st + " (using digits)"); r.Streak = st; } }
+        }
+
+        /// <summary>The same number row give or take a narrower or wider digit (175 -> 173 moves the edges).</summary>
+        static bool SameRow(Box a, Box b)
+        {
+            return Math.Abs(a.Y - b.Y) <= 1 && Math.Abs(a.H - b.H) <= 1 && Math.Abs((a.X + a.Right) - (b.X + b.Right)) <= 8;
         }
 
         static Box Rest(RgbImage img, Box row)
@@ -366,8 +415,11 @@ namespace KavrosSlayerHelper
             counterFp = WidgetFinder.Fingerprint(img, new Box(0, 0, img.W, img.H));
             counterMisses = 0;
             Status = "";
-            Box row = NumberRow(img);
+            Layout lay = FindLayout(img);
+            Box row = lay.Number;
+            if (!row.IsEmpty && row.Y > 6) r = CounterParser.Parse(OcrLines(img, FromCountDown(img, row), 3f, false));   // re-read without anything above the count
             read.CounterBy = FixNumber(img, row, row.IsEmpty ? -1 : digits.Read(img, row), ref r);
+            if (r.Left >= 0) FixValues(img, lay, r);
             if (!r.Valid) { Log.Write("counter: found by " + how + " at " + c + " but the number is unsure"); counterFp = 0; return; }
             Remember(r, img, row);
             read.Counter = r;
@@ -462,6 +514,12 @@ namespace KavrosSlayerHelper
             }
             finally { bmp.UnlockBits(d); }
             return bmp;
+        }
+
+        static void BlankExact(RgbImage img, Box r)
+        {
+            r = r.Intersect(new Box(0, 0, img.W, img.H));
+            for (int y = r.Y; y < r.Bottom; y++) Array.Clear(img.Px, (y * img.W + r.X) * 3, r.W * 3);
         }
 
         static void Blank(RgbImage img, Box r)
@@ -573,6 +631,7 @@ namespace KavrosSlayerHelper
         public void Dispose()
         {
             stop = true;
+            if (nudgeTimer != null) nudgeTimer.Dispose();
             wake.Set();
         }
     }

@@ -41,6 +41,7 @@ namespace KavrosSlayerHelper.Tests
             Run("real-fixtures", RealFixtureTests);
             Run("minimised", MinimisedTests);
             Run("regressions-0.1.3", RegressionTests);
+            Run("clock-0.1.4", ClockTests);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }

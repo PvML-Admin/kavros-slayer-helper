@@ -54,7 +54,13 @@ Zenity's Clue Helper uses (MIT; see `THIRD_PARTY.txt`):
   digit they don't know is OCR'd on its own and must agree with the whole-box read. A changed count is only
   shown after two frames in a row agree, and only if it went down by a small step (up to 20) or a new task
   appeared; anything else (a misread 99, a jump up) must hold for 8 frames before it replaces the count.
-  The panel never counts down by itself while the counter is on screen. Task names are matched to the
+  The panel never counts down by itself while the counter is on screen. The RS3 clock box (`12:34`) right
+  above the counter is found and masked out before anything is read, a time is never taken as a number,
+  and only the rows from the count down are OCR'd. Points and streak are read by their own digit shapes
+  and may only go up (a drop must hold for 8 frames). The total comes only from a new task (the master's
+  popup or the first counter read of a task), is never raised past the count by more than a few, and
+  never above the data's maximum for the task plus half again; a bogus saved total is repaired on start.
+  A changed count is confirmed by a second capture about 0.1 s later, so kills show within about a second. Task names are matched to the
   wiki data with OCR look-alikes allowed (O/D, 0/o, l/1, rn/m); a name that can't be placed is never shown.
   **Minimised**, the counter is just a small dark box with the yellow kills-left number and the slayer skull
   at its top-right; that form is found too (the skull is required, so ability-bar and buff timers aren't

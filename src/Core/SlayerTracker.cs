@@ -20,6 +20,7 @@ namespace KavrosSlayerHelper.Core
         public int LastPoints = -1;      // points from the last completed task, -1 = unknown
         public string LastChat = "";     // what the panel says it read ("only 142 more to go")
         public string LastSource = "";   // "counter", "popup", "chat" (0.1.0) or "manual"
+        public bool CounterSeen;         // the counter has been read for this task (it may set the total once)
         public DateTime Updated;
 
         public bool HasTask { get { return !string.IsNullOrEmpty(Monster); } }
@@ -30,7 +31,7 @@ namespace KavrosSlayerHelper.Core
             var o = new JObj();
             o["monster"] = Monster; o["master"] = Master; o["assigned"] = (double)Assigned; o["left"] = (double)Left;
             o["complete"] = Complete; o["streak"] = (double)Streak; o["points"] = (double)Points; o["lastPoints"] = (double)LastPoints;
-            o["lastChat"] = LastChat; o["lastSource"] = LastSource;
+            o["lastChat"] = LastChat; o["lastSource"] = LastSource; o["counterSeen"] = CounterSeen;
             o["updated"] = Updated.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
             return o;
         }
@@ -42,7 +43,7 @@ namespace KavrosSlayerHelper.Core
             s.Monster = o.Str("monster"); s.Master = o.Str("master"); s.Assigned = Math.Max(0, o.Int("assigned"));
             s.Left = o.Int("left", -1); s.Complete = o.Bool("complete"); s.Streak = Math.Max(0, o.Int("streak"));
             s.Points = Math.Max(0, o.Int("points")); s.LastPoints = o.Int("lastPoints", -1);
-            s.LastChat = o.Str("lastChat"); s.LastSource = o.Str("lastSource");
+            s.LastChat = o.Str("lastChat"); s.LastSource = o.Str("lastSource"); s.CounterSeen = o.Bool("counterSeen");
             DateTime t;
             if (DateTime.TryParse(o.Str("updated"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out t)) s.Updated = t;
             return s;
@@ -84,10 +85,34 @@ namespace KavrosSlayerHelper.Core
                 if (m != null) State.Monster = m.Name;
                 else if (State.LastSource == "counter") { State.Monster = ""; State.Left = -1; State.Assigned = 0; State.Complete = false; }
             }
+            // A bogus saved total (0.1.3 could take the clock's 12:00 as 1,200): back to the count, and the
+            // next counter read may set it again.
+            if (State.HasTask)
+            {
+                int limit = AmountLimit(State.Monster, State.Master);
+                if (State.Left > limit) { State.Left = -1; State.CounterSeen = false; }
+                if (State.Assigned > limit || (State.Assigned > 1000 && limit < 1000))
+                {
+                    State.Assigned = Math.Max(0, State.Left);
+                    State.CounterSeen = false;
+                }
+            }
         }
 
         public MonsterInfo Monster { get { return State.HasTask ? Data.FindMonster(State.Monster) : null; } }
         public SlayerMaster Master { get { return Data.FindMaster(State.Master); } }
+
+        /// <summary>The largest believable amount for a task: the master's maximum (any master's when unknown)
+        /// plus half again and 20 for extensions; 1000 for a task no master in the data assigns.</summary>
+        public int AmountLimit(string monster, string master)
+        {
+            int max = 0;
+            SlayerMaster m = Data.FindMaster(master);
+            TaskRange own = m != null ? m.TaskFor(monster) : null;
+            if (own != null && own.Max > 0) max = own.Max;
+            else foreach (SlayerMaster x in Data.Masters) { TaskRange t = x.TaskFor(monster); if (t != null && t.Max > max) max = t.Max; }
+            return max > 0 ? max * 3 / 2 + 20 : 1000;
+        }
 
         string Canonical(string raw)
         {
@@ -129,12 +154,14 @@ namespace KavrosSlayerHelper.Core
                     string name = Canonical(e.Monster);
                     if (name.Length == 0) return false;
                     int count = e.Count > 0 ? e.Count : 0;
+                    if (count > AmountLimit(name, e.Master)) count = 0;          // a misread amount: unknown instead
                     // The same assignment read again (still on screen, or a Rescan) changes nothing.
                     if (s.HasTask && !s.Complete && s.Monster == name && (count == 0 || count == s.Assigned)) return false;
                     s.Monster = name;
                     s.Assigned = count;
                     s.Left = count > 0 ? count : -1;
                     s.Complete = false;
+                    s.CounterSeen = false;
                     s.Master = GuessMaster(name, count, e.Master);
                     break;
                 }
@@ -210,20 +237,43 @@ namespace KavrosSlayerHelper.Core
                 if (m != null) name = m.Name;
             }
             if (name.Length == 0) name = s.Monster ?? "";
-            if (name.Length > 0 && name != s.Monster)
+            int left = r.Left;
+            // Beyond any master's amount for this task (plus room for extensions): a misread (the clock's
+            // 12:34 read as 1234), never a count or a total.
+            if (name.Length > 0 && left > AmountLimit(name, s.Master)) left = -1;
+            bool newTask = name.Length > 0 && (name != s.Monster || (s.Complete && !r.Minimised && left > 0 && !string.IsNullOrEmpty(r.Task)));
+            if (newTask)
             {
+                if (left < 0) return false;                     // a new task needs its count
+                bool renamed = name != s.Monster;
                 s.Monster = name;
-                s.Assigned = Math.Max(0, r.Left);
-                s.Master = GuessMaster(name, 0, null);
+                s.Assigned = left;
+                s.Left = left;
+                if (renamed || string.IsNullOrEmpty(s.Master)) s.Master = GuessMaster(name, left, null);
                 s.Complete = false;
+                s.CounterSeen = true;
                 changed = true;
             }
-            if (name.Length > 0 && r.Left >= 0 && r.Left != s.Left)
+            else if (name.Length > 0 && left >= 0)
             {
-                s.Left = r.Left;
-                changed = true;
+                if (!s.CounterSeen)
+                {
+                    // The first counter read of this task sets the count, and the total if it's bigger (the
+                    // counter beats the popup: extensions).
+                    if (left != s.Left) { s.Left = left; changed = true; }
+                    if (left > s.Assigned) { s.Assigned = left; changed = true; }
+                    s.CounterSeen = true;
+                }
+                else if (left > s.Assigned && left > s.Left + 3)
+                {
+                    // Bigger than the total and not a new task: held back, never made the new total.
+                }
+                else
+                {
+                    if (left != s.Left) { s.Left = left; changed = true; }
+                    if (left > s.Assigned) { s.Assigned = left; changed = true; }   // at most a few past the last count
+                }
             }
-            if (s.HasTask && s.Left >= 0 && s.Assigned < s.Left) { s.Assigned = s.Left; changed = true; }
             bool done = s.HasTask && s.Left == 0;
             if (done != s.Complete && s.HasTask) { s.Complete = done; changed = true; }
             if (r.Streak >= 0 && r.Streak != s.Streak) { s.Streak = r.Streak; changed = true; }
@@ -274,7 +324,7 @@ namespace KavrosSlayerHelper.Core
         {
             SlayerState s = State;
             if (!s.HasTask && string.IsNullOrEmpty(s.LastChat)) return false;
-            s.Monster = ""; s.Master = ""; s.Assigned = 0; s.Left = -1; s.Complete = false;
+            s.Monster = ""; s.Master = ""; s.Assigned = 0; s.Left = -1; s.Complete = false; s.CounterSeen = false;
             s.LastChat = ""; s.LastSource = ""; s.Updated = Now();
             return true;
         }

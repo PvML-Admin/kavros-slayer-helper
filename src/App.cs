@@ -202,6 +202,7 @@ namespace KavrosSlayerHelper
                 }
             }
             confirmWanted = counterFilter.NeedsConfirm;
+            if (confirmWanted) reader.Nudge();     // the confirming frame comes ~0.1 s later, not a whole interval
             if (changed) Changed();
         }
 

@@ -161,7 +161,9 @@ namespace KavrosSlayerHelper.Core
             int found = -1, count = 0;
             foreach (string tok in t.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
             {
-                string k = tok.Trim(',', '.', ':', ';');
+                // A clock ("12:34", "12.34", "12;34") is never the count: the whole row is out.
+                if (tok.IndexOf(':') >= 0 || Regex.IsMatch(tok, @"^\d{1,2}[.;]\d{2}$")) return -1;
+                string k = tok.Trim(',', '.', ';');
                 if (k.Length == 0) continue;
                 if (NumTok.IsMatch(k) && Regex.IsMatch(k, @"\d")) { int n = Num(k); if (n >= 0 && n < 100000) { found = n; count++; } continue; }
                 if (Regex.IsMatch(k, @"[A-Za-z]{3,}")) return -1;
@@ -267,10 +269,13 @@ namespace KavrosSlayerHelper.Core
         /// <summary>Kills left going down by a small step, the same count, or a new task.</summary>
         public bool Plausible(CounterRead r, SlayerState s)
         {
-            if (s == null || !s.HasTask || s.Left < 0) return true;
+            if (s == null || !s.HasTask || s.Left < 0) return r.Points < 0 || s == null || s.Points <= 0 || r.Points >= s.Points;
             string task = Task(r);
             if (task.Length > 0 && !string.Equals(task, s.Monster, StringComparison.OrdinalIgnoreCase)) return true;
             if (s.Complete && task.Length > 0) return true;           // a new task of the same kind after finishing one
+            // Points and streak only go up (points are spent rarely; that drop just takes longer to show).
+            if (r.Points >= 0 && s.Points > 0 && r.Points < s.Points) return false;
+            if (r.Streak >= 0 && s.Streak > 0 && r.Streak < s.Streak) return false;
             int step = s.Left - r.Left;
             return step >= 0 && step <= MaxStep;
         }

@@ -176,6 +176,7 @@ namespace KavrosSlayerHelper.Core
             blobs.RemoveAll(b => b.IsEmpty || b.H < 5);
             // Rows closer than a grid cell merge into one blob: split blobs at pixel rows without yellow.
             blobs = blobs.SelectMany(b => SplitRows(img, b)).Where(b => !b.IsEmpty && b.H >= 5).ToList();
+            blobs.RemoveAll(b => IsClock(img, b));                     // the RS3 clock box (12:34) is never the counter
             // Group blobs into stacks: rows close below each other and overlapping horizontally (or right-aligned values).
             blobs.Sort((a, b) => a.Y.CompareTo(b.Y));
             var used = new bool[blobs.Count];
@@ -225,6 +226,57 @@ namespace KavrosSlayerHelper.Core
                 result.Add(c);
             }
             result.Sort((a, b) => b.Score.CompareTo(a.Score));
+            return result;
+        }
+
+        /// <summary>The in-game clock ("12:34"): one line of yellow digits with a colon (a glyph only one or two
+        /// pixels wide) between two pairs.</summary>
+        public static bool IsClock(RgbImage img, Box t)
+        {
+            if (t.IsEmpty || t.H < 5 || t.H > 40) return false;
+            List<Box> g = DigitReader.Glyphs(img, t.Inflate(1, 1));
+            if (g.Count < 4 || g.Count > 6) return false;
+            int narrow = -1;
+            for (int i = 1; i < g.Count - 1; i++)
+                if (g[i].W <= Math.Max(2, t.H / 5) && g[i].H < t.H) { narrow = i; break; }
+            if (narrow < 0) return false;
+            int left = narrow, right = g.Count - narrow - 1;
+            return left >= 1 && left <= 2 && right == 2;
+        }
+
+        /// <summary>Clock boxes anywhere in the image (each padded to cover its dark box), to be masked out
+        /// before the counter is looked for or read.</summary>
+        public static List<Box> FindClocks(RgbImage img, int cell = 4)
+        {
+            var result = new List<Box>();
+            int cw = img.W / cell, ch = img.H / cell;
+            if (cw < 2 || ch < 2) return result;
+            var on = new bool[cw * ch];
+            for (int cy = 0; cy < ch; cy++)
+                for (int cx = 0; cx < cw; cx++)
+                {
+                    bool y0 = false;
+                    for (int y = cy * cell; y < cy * cell + cell && !y0; y++)
+                        for (int x = cx * cell; x < cx * cell + cell; x++)
+                        {
+                            int i = (y * img.W + x) * 3;
+                            if (Colours.Yellow(img.Px[i], img.Px[i + 1], img.Px[i + 2])) { y0 = true; break; }
+                        }
+                    on[cy * cw + cx] = y0;
+                }
+            var grown = new bool[cw * ch];
+            for (int cy = 0; cy < ch; cy++)
+                for (int cx = 0; cx < cw; cx++)
+                    if (on[cy * cw + cx])
+                        for (int dx = -1; dx <= 1; dx++) { int x = cx + dx; if (x >= 0 && x < cw) grown[cy * cw + x] = true; }
+            foreach (var comp in Components(grown, cw, ch))
+            {
+                Box cb = comp.Key;
+                if (cb.H > 12 || cb.W > 40) continue;
+                Box t = Tight(img, new Box(cb.X * cell, cb.Y * cell, cb.W * cell, cb.H * cell));
+                foreach (Box row in SplitRows(img, t))
+                    if (IsClock(img, row)) result.Add(row.Inflate(row.H / 2 + 3, row.H / 2 + 2).Intersect(new Box(0, 0, img.W, img.H)));
+            }
             return result;
         }
 
@@ -316,6 +368,7 @@ namespace KavrosSlayerHelper.Core
                 Box t = Tight(img, new Box(cb.X * cell, cb.Y * cell, cb.W * cell, cb.H * cell));
                 if (t.IsEmpty || t.H < 7 || t.H > 40 || t.W < 4 || t.W > t.H * 5) continue;
                 if (SplitRows(img, t).Count() > 1) continue;                     // one line only
+                if (IsClock(img, t)) continue;
                 // Nothing else yellow nearby: the expanded counter's values have rows above and below.
                 if (YellowPixels(img, new Box(t.X - t.H / 2, t.Y - t.H * 2, t.W + t.H, t.H * 5), t) * 10 > YellowPixels(img, t, Box.Empty) * 3) continue;
                 List<Box> glyphs = DigitReader.Glyphs(img, t.Inflate(1, 1));
